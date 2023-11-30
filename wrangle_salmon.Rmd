@@ -1,0 +1,332 @@
+---
+title: "Wrangle Salmon"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(tidyverse)
+library(powerjoin)
+library(data.table)
+library(synExtra)
+library(tximport)
+
+synapser::synLogin()
+
+syn <- synDownloader("~/data", .cache = TRUE)
+```
+
+```{r}
+inputs <- c(
+  sample_meta = "syn53061904"
+)
+
+input_files <- map(
+  inputs, syn
+)
+
+```
+
+## Metadata
+
+```{r}
+sample_meta <- read_csv(input_files[["sample_meta"]])
+```
+
+```{r}
+# library(AnnotationHub)
+# ah = AnnotationHub()
+
+ensembl_gtf <- rtracklayer::readGFF(
+  here("index", "Homo_sapiens.GRCh38.110.gtf.gz"),
+  columns = c("seqid", "source", "type"),
+  tags = c("transcript_id", "gene_id", "gene_name", "gene_biotype")
+) %>%
+  as_tibble()
+
+ensembl_gtf %>%
+  filter(type == "gene") %>%
+  drop_na(gene_name, gene_id) %>%
+  distinct() %>%
+  group_by(gene_name) %>%
+  filter(n() > 1) %>%
+  ungroup() %>%
+  arrange(gene_name)
+
+transcript_gene_map <- ensembl_gtf %>%
+  filter(type == "transcript") %>%
+  distinct(gene_id, transcript_id)
+```
+
+## Salmon quants
+
+```{r}
+
+salmon_files <- Sys.glob("quants/*/quant.sf") %>%
+  set_names(str_split_fixed(., fixed("/"), 3)[, 2])
+
+salmon_quant <- tximport(
+  salmon_files,
+  type = "salmon", txOut = TRUE,
+  ignoreTxVersion = TRUE
+)
+
+salmon_tpm <- salmon_quant[c("abundance", "counts")] %>%
+  imap(
+    \(mat, n) as_tibble(mat, rownames = "transcript_id") %>%
+      pivot_longer(
+        -transcript_id,
+        names_to = "sample_accession", values_to = n
+      )
+  ) %>%
+  reduce(left_join) %>%
+  # Remove transcript version
+  mutate(
+    transcript_id = str_remove(transcript_id, "\\.\\d+$")
+  ) %>%
+  rename(
+    tpm = abundance,
+    count = counts
+  )
+
+write_csv(
+  salmon_tpm,
+  here("quants", "salmon_tpm.csv.gz")
+)
+# salmon_tpm <- read_csv(here("quants", "salmon_tpm.csv.gz"))
+```
+
+
+```{r}
+salmon_gene_quant <- tximport(
+  salmon_files,
+  type = "salmon", txOut = FALSE,
+  tx2gene = select(transcript_gene_map, transcript_id, gene_id),
+  ignoreTxVersion = TRUE
+)
+
+salmon_gene_tpm <- salmon_gene_quant[c("abundance", "counts")] %>%
+  imap(
+    \(mat, n) as_tibble(mat, rownames = "gene_id") %>%
+      pivot_longer(
+        -gene_id,
+        names_to = "sample_accession", values_to = n
+      )
+  ) %>%
+  reduce(left_join) %>%
+  # Remove transcript version
+  rename(
+    tpm = abundance,
+    count = counts
+  )
+
+write_csv(
+  salmon_gene_tpm,
+  here("quants", "salmon_gene_tpm.csv.gz")
+)
+# salmon_tpm <- read_csv(here("quants", "salmon_gene_tpm.csv.gz"))
+```
+
+
+
+```{r}
+size_factors <- DESeq2::estimateSizeFactorsForMatrix(
+  salmon_quant$counts
+) %>%
+  enframe("sample_accession", "size_factor")
+
+write_csv(
+  size_factors,
+  here("quants", "size_factors.csv")
+)
+```
+
+
+```{r}
+quants_dir_syn <- synMkdir(
+  "syn53061839", "quants"
+)
+
+synStoreMany(
+  c(
+    here("quants", "salmon_tpm.csv.gz"),
+    here("quants", "size_factors.csv")
+  ),
+  parentId = quants_dir_syn,
+  forceVersion = FALSE
+)
+
+```
+
+
+```{r}
+yamanaka_factors <- c("KLF4", "MYC", "POU5F1", "SOX2")
+
+yamanaka_transcripts <- ensembl_gtf %>%
+  filter(
+    type == "transcript",
+    gene_name %in% yamanaka_factors
+  ) %>%
+  distinct(transcript_id, gene_name, gene_id)
+
+```
+
+```{r}
+p <- salmon_tpm %>%
+  inner_join(
+    transcripts_of_interest,
+    by = "transcript_id"
+  ) %>%
+  mutate(
+    tpm = tpm + 0.01
+  ) %>%
+  ggplot(
+    aes(
+      x = transcript_id,
+      y = tpm,
+    )
+  ) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    facet_wrap(~gene_name, scales = "free_x") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+    )
+
+dir.create("plots")
+ggsave(
+  here("plots", "yamanaka_all_tpms.pdf"),
+  p,
+  width = 10, height = 6
+)
+
+```
+
+
+
+```{r}
+library(ggbeeswarm)
+
+sendai_tpm <- salmon_tpm %>%
+  filter(
+    str_starts(transcript_id, fixed("Sendai"))
+  )
+
+p <- sendai_tpm %>%
+  mutate(
+    tpm = tpm + 0.01
+  ) %>%
+  ggplot(
+    aes(
+      x = transcript_id,
+      y = tpm,
+    )
+  ) +
+    geom_quasirandom() +
+    scale_y_log10() +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+    )
+
+dir.create("plots")
+ggsave(
+  here("plots", "sendai_all_tpm_beeswarm.pdf"),
+  p,
+  width = 10, height = 6
+)
+
+```
+
+```{r}
+
+p <- sendai_tpm %>%
+  inner_join(
+    sample_meta %>%
+      filter(
+        study_name == "Buckberry Nature 2023"
+      )
+  ) %>%
+  pivot_longer(c(tpm, count), names_to = "count_type", values_to = "value") %>%
+  mutate(
+    is_zero = value == 0,
+    value = value + 0.01
+  ) %>%
+  ggplot(
+    aes(
+      x = transcript_id,
+      y = value,
+      fill = treatment,
+      shape = is_zero
+    )
+  ) +
+    geom_quasirandom(color = alpha("black", 0)) +
+    scale_y_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+    # triangle down for zero values, circle for non-zero
+    scale_shape_manual(values = c(`FALSE` = 21, `TRUE` = 25), guide = "none") +
+    theme_light() +
+    guides(color = "none", fill = "none") +
+    facet_grid(vars(count_type), vars(treatment), scales = "free_y") +
+    labs(x = NULL) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+    )
+
+dir.create("plots")
+ggsave(
+  here("plots", "sendai_buckberry_by_treatment_tpm_beeswarm.pdf"),
+  p,
+  width = 7.5, height = 3.5
+)
+
+```
+
+
+```{r}
+liu_timepoints <- c(
+  "D3", "D7", "D10", "D13", "D21", "P3", "P10"
+)
+
+liu_2020_sendai_tpm <- sendai_tpm %>%
+  inner_join(
+    sample_meta %>%
+      filter(
+        study_name == "Liu Nature 2020"
+      )
+  ) %>%
+  pivot_longer(c(tpm, count), names_to = "count_type", values_to = "value") %>%
+  mutate(
+    is_zero = value == 0,
+    value = value + 0.01,
+    time_point = factor(time_point, levels = liu_timepoints, ordered = TRUE)
+  )
+
+p <- liu_2020_sendai_tpm %>%
+  filter(count_type == "tpm") %>%
+  ggplot(
+    aes(
+      x = time_point,
+      y = value,
+      fill = transcript_id,
+      shape = is_zero
+    )
+  ) +
+    geom_quasirandom(color = alpha("black", 0)) +
+    scale_y_log10(labels = scales::trans_format("log10", scales::label_math(10^.x))) +
+    # triangle down for zero values, circle for non-zero
+    scale_shape_manual(values = c(`FALSE` = 21, `TRUE` = 25), guide = "none") +
+    theme_light() +
+    guides(color = "none", fill = guide_legend(override.aes = list(shape = 21))) +
+    facet_wrap(vars(treatment), scales = "free_x")
+
+dir.create("plots")
+ggsave(
+  here("plots", "sendai_liu_nature_2020_tpm_beeswarm_over_time.pdf"),
+  p,
+  width = 6, height = 3.5
+)
+
+```
