@@ -1,0 +1,126 @@
+---
+title: "Coverage of Yamanaka factors"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(tidyverse)
+library(powerjoin)
+library(data.table)
+library(synExtra)
+
+# library(rtracklayer)
+# library(graphics)
+# library(ggcoverage)
+# library(ggpattern)
+
+synapser::synLogin()
+
+syn <- synDownloader("~/data", .cache = TRUE)
+```
+
+## Metadata
+
+```{r}
+inputs <- c(
+  sample_meta = "syn53061904"
+)
+
+input_files <- map(
+  inputs, syn
+)
+sample_meta <- read_csv(input_files[["sample_meta"]])
+
+```
+
+```{r}
+# library(AnnotationHub)
+# ah = AnnotationHub()
+
+ensembl_gtf = rtracklayer::import.gff(
+    con = here("index", "Homo_sapiens.GRCh38.110.gtf.gz"), format = "gtf"
+)
+
+ensembl_genes <- ensembl_gtf %>%
+  as_tibble() %>%
+  select(
+    seqnames, source, type, start, end,
+    transcript_id, gene_id, gene_name, gene_biotype
+  ) %>%
+  filter(gene_biotype == "protein_coding")
+
+transcript_gene_map <- ensembl_genes %>%
+  filter(type == "transcript") %>%
+  distinct(gene_id, transcript_id)
+```
+
+
+```{r}
+yamanaka_factors <- c("KLF4", "MYC", "POU5F1", "SOX2")
+```
+
+```{r}
+yamanaka_gtf <- ensembl_gtf[
+  ensembl_gtf$gene_name %in% yamanaka_factors &
+    replace_na(str_detect(ensembl_gtf$tag, "MANE_Select"), FALSE)
+]
+
+yamanaka_utrs <- yamanaka_gtf[
+  str_detect(yamanaka_gtf$type, "utr")
+]
+
+yamanaka_cds <- yamanaka_gtf[
+  yamanaka_gtf$type == "CDS"
+] %>%
+  S4Vectors::split(.$gene_id)
+```
+
+
+```{r}
+bam_files <- sample_meta %>%
+  select(sample_accession) %>%
+  mutate(
+    bam_path = file.path("star", paste0(sample_accession, "_Aligned.out_sorted.bam")),
+    bam_exists = file.exists(bam_path)
+  )
+
+bam_file_list <- Rsamtools::BamFileList(
+  bam_files %>%
+    filter(bam_exists) %>%
+    pull(bam_path),
+  yieldSize = 100000,
+  asMates = TRUE
+)
+
+BiocParallel::register(BiocParallel::MulticoreParam(workers = 4, progressbar = TRUE))
+yamanaka_utr_counts <- GenomicAlignments::summarizeOverlaps(
+  yamanaka_utrs,
+  bam_file_list,
+  mode = "Union",
+  ignore.strand = TRUE,
+  singleEnd = FALSE,
+  fragments = FALSE
+)
+
+yamanaka_cds_counts <- GenomicAlignments::summarizeOverlaps(
+  yamanaka_cds,
+  bam_file_list,
+  mode = "IntersectionStrict",
+  ignore.strand = TRUE,
+  singleEnd = FALSE,
+  fragments = FALSE
+)
+
+```
+
+
+
+```{r}
+yamanaka_regions <- yamanaka_gtf[yamanaka_gtf$type == "gene"]
+start(yamanaka_regions) <- start(yamanaka_regions) - 1000
+end(yamanaka_regions) <- end(yamanaka_regions) + 1000
+
+```
