@@ -1,0 +1,304 @@
+---
+title: "Wrangle metadata"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(tidyverse)
+library(powerjoin)
+library(synExtra)
+
+synapser::synLogin()
+```
+
+Metadata and reads already downloaded using `pysradb` and `fasterq-dump`.
+
+## Metadata
+
+```{r}
+projects <- tribble(
+  ~study_name, ~study_accession, ~geo_accession,
+  "Liu Nature 2020", "SRP259918", "GSE149694",
+  "Buckberry Nature 2023", "SRP286549", "GSE159114",
+  "Liu Nat Met 2017", "SRP115256", NA
+)
+
+run_metadata_fastqdl <- projects %>%
+  mutate(
+    data = map(
+      study_accession,
+      \(x) read_tsv(here("raw", x, "meta.tsv"), na = c("<NA>", "", "NA")) %>%
+        select(-study_accession)
+    )
+  ) %>%
+  unnest(data) %>%
+  janitor::remove_empty("cols")
+
+write_csv(
+  run_metadata_fastqdl,
+  here("raw", "run_meta", "run_metadata_fastqdl.csv")
+)
+```
+
+
+```{r}
+dir.create(here("raw", "run_meta"))
+run_meta_xml <- projects %>%
+  mutate(
+    run_meta = map(
+      study_accession,
+      \(x) processx::run(
+        "efetch",
+        c(
+          "-db", "sra", "-format", "native",
+          "-id", x
+        ),
+      )
+    )
+  )
+pwalk(
+  run_meta_xml,
+  \(run_meta, study_accession, ...) {
+    write_file(
+      run_meta$stdout,
+      here("raw", "run_meta", paste0(study_accession, ".xml"))
+    )
+  }
+)
+
+```
+
+```{r}
+read_sra_xml <- function(file) {
+  library(xml2)
+  meta_xml <- read_xml(file)
+  recs <- xml_find_all(meta_xml, "//RUN")
+  extract_values <- function(n, tag) {
+    nodes <- xml_find_all(n, tag)
+    df <- map(nodes, xml_attrs) %>%
+      map(as.data.frame.list) %>%
+      data.table::rbindlist(fill = TRUE)
+    df[["value"]] <- map_chr(nodes, xml_text)
+    df
+  }
+  files <- map(recs, \(x) extract_values(x, ".//SRAFile"))
+  primary_id <- map_chr(recs, \(x) xml_find_all(x, "./IDENTIFIERS/PRIMARY_ID") %>% xml_text())
+  combined_meta <- tibble(
+    run_accession = primary_id,
+    files = files
+  ) %>%
+    unnest(files)
+}
+
+run_metadata_extracted <- projects %>%
+  mutate(
+    data = map(
+      study_accession,
+      \(x) read_sra_xml(here("raw", "run_meta", paste0(x, ".xml")))
+    )
+  ) %>%
+  unnest(data) %>%
+  janitor::remove_empty("cols")
+
+write_csv(
+  run_metadata_extracted,
+  here("raw", "run_meta", "run_metadata_extracted.csv")
+)
+# run_metadata_extracted <- read_csv(
+#   here("raw", "run_meta", "run_metadata_extracted.csv")
+# )
+```
+
+
+```{r}
+
+original_filenames <- run_metadata_extracted %>%
+  filter(supertype == "Original") %>%
+  select(run_accession, filename)
+
+original_filenames_trimmed <- original_filenames %>%
+  mutate(
+    trimmed = str_replace(
+      filename,
+      "(_L[0-9]+|_lane_[0-9]+)?_R[12](_001)?\\.fastq\\.gz",
+      ""
+    )
+  ) %>%
+  distinct(run_accession, trimmed)
+```
+
+
+`run_metadata_fastqdl` contains some duplicate samples. Same biological sample
+was run multiple times. Have to merge them later.
+
+Ugh the metadata from SRA is missing some of the sample attributes. Have to
+go to Biosample manually and get the xml files
+
+https://www.ncbi.nlm.nih.gov/biosample?Db=biosample&DbFrom=bioproject&Cmd=Link&LinkName=bioproject_biosample&LinkReadableName=BioSample&ordinalpos=1&IdsFromResult=667717
+https://www.ncbi.nlm.nih.gov/biosample?Db=biosample&DbFrom=bioproject&Cmd=Link&LinkName=bioproject_biosample&LinkReadableName=BioSample&ordinalpos=1&IdsFromResult=629766
+https://www.ncbi.nlm.nih.gov/biosample?Db=biosample&DbFrom=bioproject&Cmd=Link&LinkName=bioproject_biosample&LinkReadableName=BioSample&ordinalpos=1&IdsFromResult=397941
+
+```{r}
+read_biosample_xml <- function(file) {
+  library(xml2)
+  meta_xml <- read_xml(file)
+  recs <- xml_find_all(meta_xml, "//BioSample")
+  extract_values <- function(n, tag) {
+    nodes <- xml_find_all(n, tag)
+    df <- map(nodes, xml_attrs) %>%
+      map(as.data.frame.list) %>%
+      data.table::rbindlist(fill = TRUE)
+    df[["value"]] <- map_chr(nodes, xml_text)
+    df
+  }
+  ids <- map(recs, \(x) extract_values(x, ".//Id"))
+  attributes <- map(recs, \(x) extract_values(x, ".//Attribute"))
+  title <- map_chr(recs, \(x) xml_find_all(x, ".//Title") %>% xml_text())
+  ids_wide <- ids %>%
+    map(
+      \(x) select(x, db, value) %>% pivot_wider(names_from = db, values_from = value)
+    ) %>%
+    bind_rows()
+  combined_meta <- ids_wide %>%
+    mutate(
+      title = title,
+      data = map(
+        attributes,
+        \(x) select(x, attribute_name, value) %>%
+          pivot_wider(names_from = attribute_name, values_from = value)
+      )
+    ) %>%
+    unnest(data)
+}
+
+biosample_meta_raw <- bind_rows(
+  read_biosample_xml(here("raw", "SRP286549", "biosample_result.xml")) %>%
+    transmute(
+      biosample = BioSample, GEO, title, source_name,
+      background, treatment
+    ),
+  read_biosample_xml(here("raw", "SRP259918", "biosample_result.xml")) %>%
+    separate(
+      `cell subtype/time point`,
+      into = c("treatment", "time_point"),
+      sep = "-"
+    ) %>%
+    transmute(
+      biosample = BioSample, GEO, title, source_name,
+      background = `source cell type`, cell_type = `cell type`,
+      # treatment = recode(treatment, Fibroblast = "control"),
+      treatment,
+      time_point
+    ),
+  read_biosample_xml(here("raw", "SRP115256", "biosample_result.xml")) %>%
+    transmute(
+      biosample = BioSample, title, source_name = `NA`,
+      tissue, age, isolate
+    ) %>%
+    extract(
+      source_name,
+      into = c("time_point", NA, "treatment"),
+      regex = "(.*) ([0-9]+[FM]+|H9) (.*)",
+      remove = FALSE
+    ) %>%
+    mutate(
+      treatment = str_replace(treatment, " replicate [12]", "") %>%
+        str_replace("^r", ""),
+      time_point = str_replace(time_point, "plus", "+")
+    )
+)
+```
+
+Buckberry samples are most likely mislabeled in SRA. Based on their filenames
+we can try to reconstruct their actual identity
+
+```{r}
+buckberry_manual_labels <- tibble::tribble(
+  ~biosample, ~treatment, ~time_point_manual,
+  "SAMN16380671", "Control ESC", "P13 + 20",
+  "SAMN16380670", "Control ESC", "P13 + 14",
+  "SAMN16380669",       "Naïve", "P15",
+  "SAMN16380668",      "Primed", "P17",
+  "SAMN16380667",      "Primed", "P18",
+  "SAMN16380666",         "TNT", "P17",
+  "SAMN16380665",         "TNT", "P16",
+  "SAMN16380664",  "Fibroblast", "P8",
+  "SAMN16380663",  "Fibroblast", "P20 + 3",
+  "SAMN16380662",         "NtP", "P4 + 19",
+  "SAMN16380661",         "NtP", "P9 + 13",
+  "SAMN16380656",       "Naïve", "P15"
+)
+
+biosample_meta <- biosample_meta_raw %>%
+  rename(
+    treatment_original = treatment
+  ) %>%
+  left_join(
+    buckberry_manual_labels,
+    by = c("biosample")
+  ) %>%
+  mutate(
+    treatment = coalesce(treatment, treatment_original),
+    time_point = coalesce(time_point_manual, time_point)
+  ) %>%
+  power_left_join(
+    run_metadata_fastqdl %>%
+      power_left_join(
+        original_filenames_trimmed,
+        by = c("run_accession"),
+        check = check_specs(
+          unmatched_keys_left = "warn",
+          unmatched_keys_right = "warn",
+          duplicate_keys_right = "warn",
+          duplicate_keys_left = "warn"
+        )
+      ) %>%
+      group_by(
+        sample_accession, biosample, study_accession, study_name, geo_accession
+      ) %>%
+      summarize(
+        filename_prefix = str_c(unique(trimmed), collapse = ","),
+        .groups = "drop"
+      ),
+    by = c("biosample"),
+    check = check_specs(
+      unmatched_keys_left = "warn",
+      unmatched_keys_right = "warn",
+      duplicate_keys_right = "warn",
+      duplicate_keys_left = "warn"
+    )
+  ) %>%
+  select(
+    study_name, study_accession, geo_accession,
+    sample_accession, biosample, title, source_name,
+    filename_prefix,
+    everything(), -GEO
+  )
+
+write_csv(
+  biosample_meta,
+  here("raw", "biosample_meta.csv")
+)
+
+```
+
+```{r}
+meta_dir_syn <- synMkdir(
+  "syn53061839", "meta"
+)
+
+synStoreMany(
+  c(
+    here("raw", "run_meta", "run_metadata_fastqdl.csv"),
+    here("raw", "run_meta", "run_metadata_extracted.csv"),
+    here("raw", "biosample_meta.csv")
+  ),
+  parentId = meta_dir_syn,
+  forceVersion = FALSE
+)
+
+```
+
