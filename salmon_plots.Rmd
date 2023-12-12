@@ -22,7 +22,8 @@ syn <- synDownloader("~/data", .cache = TRUE)
 inputs <- c(
   sample_meta = "syn53061904",
   salmon_quants = "syn53061910",
-  salmon_gene_quants = "syn53061989"
+  salmon_gene_quants = "syn53061989",
+  yamanaka_ratios = "syn53090238"
 )
 
 input_files <- map(
@@ -37,6 +38,7 @@ input_files <- map(
 sample_meta <- read_csv(input_files[["sample_meta"]])
 salmon_quants <- read_csv(input_files[["salmon_quants"]])
 salmon_gene_quants <- read_csv(input_files[["salmon_gene_quants"]])
+yamanaka_ratios <- read_csv(input_files[["yamanaka_ratios"]])
 
 ```
 
@@ -192,30 +194,92 @@ ggsave(
 
 
 ```{r}
-time_course_samples <- tribble(
-  ~treatment, ~time_point, ~time_point_plot, ~stage,
-  "Fibroblast", "P8", "P8", "Fibroblast",
-  "Fibroblast", "P20 + 3", "P20 + 3", "Fibroblast",
-  "Fibroblast", "D3", "D3", "Fibroblast",
-  "Fibroblast", "D7", "D7", "Fibroblast",
-  "Primed", "D13", "D13_", "Primed",
-  "Primed", "D21", "D21", "Primed",
-  "Primed", "P3", "P3", "Primed",
-  "Primed", "P10", "P10", "Primed",
-  "Primed", "P17", "P17", "Primed",
-  "Primed", "P18", "P18", "Primed",
-  "5iLAF", "D13", "D13", "Transition",
-  "NHSM", "D13", "D13", "Transition",
-  "t2iLGoY", "D13", "D13", "Transition",
-  "RSeT", "D13", "D13", "Transition",
-  "Naïve", "P15", "P15", "Naïve"
-) %>%
+sample_meta_edited <- sample_meta %>%
   mutate(
-    across(time_point_plot, \(x) fct_inorder(x, ordered = TRUE)),
-    medium = if_else(
-      stage == "Transition",
-      treatment,
-      NA_character_
+    treatment = if_else(
+      treatment == "Naïve",
+      "t2iLGoY",
+      treatment
+    )
+  )
+
+time_course_samples <- tribble(
+  ~treatment, ~time_point, ~time_point_plot, ~sample_group,
+  "Fibroblast", "P8", "D0", "Fibroblast",
+  "Fibroblast", "P20 + 3", "D0", "Fibroblast",
+  "Fibroblast", "D3", "D3", "Sendai Reprogramming",
+  "Fibroblast", "D7", "D7", "Sendai Reprogramming",
+) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("5iLAF", "NHSM", "t2iLGoY", "RSeT"),
+        tissue == "iPSCs" | is.na(tissue)
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = time_point,
+        sample_group = "Naïve"
+      )
+  ) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("Primed"),
+        tissue == "iPSCs" | is.na(tissue)
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = time_point,
+        sample_group = "Primed"
+      )
+  ) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("Control ESC") |
+          (replace_na(tissue == "ESCs", FALSE) & treatment == "Primed")
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = "ESC",
+        sample_group = "ESC"
+      )
+  ) %>%
+  mutate(
+    across(
+      time_point_plot,
+      \(x) {
+        y <- tibble(time_point = x) %>%
+          extract(
+            time_point,
+            into = c("prefix", "number"),
+            regex = "^([A-Za-z]+)([0-9]+).*$",
+            remove = FALSE,
+            convert = TRUE
+          ) %>%
+          arrange(prefix == "P", number)
+        # browser()
+        ordered(
+          x,
+          y %>%
+            pull(time_point) %>%
+            c("ESC") %>%
+            unique()
+        )
+      }
+    ),
+    medium = case_when(
+      treatment %in% c("5iLAF", "NHSM", "t2iLGoY", "RSeT") ~ treatment,
+      treatment %in% c("Primed") & !sample_group == "ESC" ~ "Primed medium (?)",
+      TRUE ~ NA_character_
+    ),
+    stage = case_when(
+      sample_group %in% c("Fibroblast") ~ "Fibroblast",
+      sample_group %in% c("Sendai Reprogramming") ~ "Sendai Reprogramming",
+      sample_group %in% c("Naïve", "Primed") ~ "Naïve/Primed",
+      sample_group %in% c("ESC") ~ "ESC",
+      TRUE ~ NA_character_
     )
   )
 
@@ -227,8 +291,8 @@ stage_markers <- time_course_samples %>%
     .groups = "drop"
   )
 
-time_course_data <- sample_meta %>%
-  filter(study_name %in% c("Buckberry Nature 2023", "Liu Nature 2020")) %>%
+time_course_data <- sample_meta_edited %>%
+  # filter(study_name %in% c("Buckberry Nature 2023", "Liu Nature 2020")) %>%
   inner_join(
     time_course_samples,
     by = c("treatment", "time_point")
@@ -240,25 +304,33 @@ time_course_data <- sample_meta %>%
         transcript_id != "Sendai_F_gene"
       ) %>%
       group_by(sample_accession) %>%
-      summarize(tpm = mean(tpm), .groups = "drop"),
+      summarize(across(c(tpm, count), mean), .groups = "drop"),
     by = "sample_accession"
   )
 
 line_set_data <- tribble(
-  ~set, ~stage,
-  "Primed", "Fibroblast",
+  ~set, ~sample_group,
+  "Sendai Reprogramming", "Fibroblast",
+  "Sendai Reprogramming", "Sendai Reprogramming",
+  "Naïve", "Sendai Reprogramming",
+  "Naïve", "Naïve",
+  "Primed", "Sendai Reprogramming",
   "Primed", "Primed",
-  "Naïve", "Fibroblast",
-  "Naïve", "Transition",
-  "Naïve", "Naïve"
 ) %>%
   inner_join(
     time_course_data,
-    by = "stage",
+    by = "sample_group",
     relationship = "many-to-many"
   ) %>%
-  group_by(set, stage, time_point_plot) %>%
-  summarize(tpm = mean(tpm), .groups = "drop")
+  group_by(set, sample_group, time_point_plot, medium) %>%
+  summarize(across(c(tpm, count), mean), .groups = "drop") %>%
+  bind_rows(
+    filter(., time_point_plot == "D7") %>%
+    select(-medium) %>%
+    crossing(
+      medium = c("5iLAF", "NHSM", "t2iLGoY", "RSeT", "Primed medium (?)")
+    )
+  )
 
 STAGE_Y_POS = Inf
 
@@ -272,12 +344,8 @@ p <- time_course_data %>%
     )
   ) +
     scale_x_discrete(
-      limits = unique(time_course_samples$time_point_plot),
+      limits = levels(time_course_samples$time_point_plot),
       labels = \(x) str_replace(x, "_", "")
-    ) +
-    scale_color_hue(
-      breaks = na.omit(unique(time_course_data$medium)),
-      na.value = "black"
     ) +
     geom_rect(
       aes(
@@ -300,33 +368,43 @@ p <- time_course_data %>%
       aes(
         xmin = start, xmax = end, x = after_stat(.5 * (xmin + xmax)), label = stage
       ),
-      data = stage_markers,
+      data = stage_markers %>%
+        mutate(
+          stage = str_replace(stage, " ", "\n")
+        ),
       y = STAGE_Y_POS,
       size = 3,
       hjust = .5, vjust = 1,
       inherit.aes = FALSE
     ) +
+    # ggnewscale::new_scale_color() +
     geom_line(
       aes(
         x = time_point_plot,
         y = tpm,
-        group = set
+        group = medium,
+        color = medium
       ),
       data = line_set_data,
       inherit.aes = FALSE,
-      color = "black",
+      # color = "black",
       alpha = 0.8
     ) +
     geom_segment(
       aes(
         x = stage(time_point_plot, after_stat = x - .1),
         xend = stage(time_point_plot, after_stat = x + .1),
-        y = tpm, yend = tpm
+        y = tpm, yend = tpm,
+        color = medium
       ),
       data = line_set_data,
       inherit.aes = FALSE,
-      color = "black",
+      # color = "black",
       alpha = 0.8
+    ) +
+    scale_color_hue(
+      breaks = na.omit(unique(time_course_data$medium)),
+      na.value = "black"
     ) +
     theme_minimal() +
     theme(plot.background = element_rect(fill = "white", color = NA)) +
@@ -340,9 +418,16 @@ ggsave(
 )
 
 
-
 p <- time_course_data %>%
   mutate(
+    hovertext = glue::glue(
+      "{study_name} {sample_accession}",
+      "Title: \"{title}\"",
+      "Source Name: \"{source_name}\"",
+      "File Name: \"{filename_prefix}\"",
+      "TPM: {signif(tpm, 3)} Count: {signif(count, 3)} (three significant figures)",
+      .sep = "\n"
+    ),
     is_zero = tpm == 0,
     tpm = tpm + 0.005
   ) %>%
@@ -351,16 +436,13 @@ p <- time_course_data %>%
     aes(
       time_point_plot,
       tpm,
-      color = medium
+      color = medium,
+      text = hovertext
     )
   ) +
     scale_x_discrete(
-      limits = unique(time_course_samples$time_point_plot),
+      limits = levels(time_course_samples$time_point_plot),
       labels = \(x) str_replace(x, "_", "")
-    ) +
-    scale_color_hue(
-      breaks = na.omit(unique(time_course_data$medium)),
-      na.value = "black"
     ) +
     geom_rect(
       aes(
@@ -369,53 +451,64 @@ p <- time_course_data %>%
         fill = stage
       ),
       data = stage_markers,
-      alpha = 0.4,
+      alpha = 0.3,
       ymin = -Inf, ymax = Inf,
       inherit.aes = FALSE,
       show.legend = FALSE
     ) +
     scale_fill_brewer(palette = "Pastel2") +
     geom_quasirandom(
-      aes(shape = study_name),
-      dodge.width = .7
+      aes(shape = study_name, group = medium),
+      dodge.width = .5
     ) +
     geom_text(
       aes(
         xmin = start, xmax = end, x = after_stat(.5 * (xmin + xmax)), label = stage
       ),
-      data = stage_markers,
+      data = stage_markers %>%
+        mutate(
+          stage = str_replace(stage, " ", "\n")
+        ),
       y = STAGE_Y_POS,
       size = 3,
       hjust = .5, vjust = 1,
       inherit.aes = FALSE
     ) +
+    # ggnewscale::new_scale_color() +
     geom_line(
       aes(
         x = time_point_plot,
         y = tpm,
-        group = set
+        group = medium,
+        color = medium
       ),
       data = line_set_data %>%
         mutate(
           tpm = tpm + 0.005
         ),
       inherit.aes = FALSE,
-      color = "black",
+      # color = "black",
       alpha = 0.8
     ) +
-    geom_segment(
-      aes(
-        x = stage(time_point_plot, after_stat = x - .1),
-        xend = stage(time_point_plot, after_stat = x + .1),
-        y = tpm, yend = tpm
-      ),
-      data = line_set_data %>%
-        mutate(
-          tpm = tpm + 0.005
-        ),
-      inherit.aes = FALSE,
-      color = "black",
-      alpha = 0.8
+    # geom_segment(
+    #   aes(
+    #     x = stage(time_point_plot, after_stat = x - .1),
+    #     xend = stage(time_point_plot, after_stat = x + .1),
+    #     y = tpm, yend = tpm,
+    #     color = medium
+    #   ),
+    #   data = line_set_data %>%
+    #     filter(!(time_point_plot == "D7" & !is.na(medium))) %>%
+    #     mutate(
+    #       tpm = tpm + 0.005
+    #     ),
+    #   inherit.aes = FALSE,
+    #   # color = "black",
+    #   alpha = 0.8
+    # ) +
+    scale_color_hue(
+      breaks = na.omit(unique(time_course_data$medium)),
+      na.value = "black"
     ) +
     geom_hline(
       yintercept = 0.005,
@@ -423,7 +516,10 @@ p <- time_course_data %>%
       linetype = "dashed"
     ) +
     theme_minimal() +
-    scale_y_log10(labels = scales::trans_format("log10", scales::label_math(10^.x))) +
+    scale_y_log10(
+      labels = scales::trans_format("log10", scales::label_math(10^.x)),
+      expand = expansion(mult = c(0, 0.15))
+    ) +
     theme(plot.background = element_rect(fill = "white", color = NA)) +
     coord_cartesian(clip = "off") +
     labs(y = "Average TPM Sendai genes", x = NULL, shape = "Source", color = "Medium")
@@ -434,7 +530,184 @@ ggsave(
   width = 8.5, height = 3
 )
 
+
+plt <- plotly::ggplotly(p, tooltip = "text")
+rmarkdown::find_pandoc(dir = "/usr/local/bin")
+htmlwidgets::saveWidget(
+  plt,
+  here("plots", "sendai_time_course_log.html"),
+  selfcontained = TRUE
+)
+
 ```
+
+```{r}
+
+time_course_data <- sample_meta_edited %>%
+  # filter(study_name %in% c("Buckberry Nature 2023", "Liu Nature 2020")) %>%
+  inner_join(
+    time_course_samples,
+    by = c("treatment", "time_point")
+  ) %>%
+  inner_join(
+    yamanaka_ratios,
+    by = "sample_accession"
+  ) %>%
+  mutate(
+    count_sum = count_cds + count_utrs,
+    count_low = count_sum < 50
+  )
+
+line_set_data <- tribble(
+  ~set, ~sample_group,
+  "Sendai Reprogramming", "Fibroblast",
+  "Sendai Reprogramming", "Sendai Reprogramming",
+  "Naïve", "Sendai Reprogramming",
+  "Naïve", "Naïve",
+  "Primed", "Sendai Reprogramming",
+  "Primed", "Primed",
+) %>%
+  inner_join(
+    time_course_data,
+    by = "sample_group",
+    relationship = "many-to-many"
+  ) %>%
+  group_by(set, sample_group, time_point_plot, medium, gene_name) %>%
+  summarize(across(c(ratio_rpk), \(x) 10^(sum(log10(x)) / length(x))), .groups = "drop") %>%
+  bind_rows(
+    filter(., time_point_plot == "D7") %>%
+    select(-medium) %>%
+    crossing(
+      medium = c("5iLAF", "NHSM", "t2iLGoY", "RSeT", "Primed medium (?)")
+    )
+  )
+
+STAGE_Y_POS = Inf
+
+
+p <- time_course_data %>%
+  mutate(
+    hovertext = glue::glue(
+      "{study_name} {sample_accession}",
+      "Title: \"{title}\"",
+      "Source Name: \"{source_name}\"",
+      "File Name: \"{filename_prefix}\"",
+      "Ratio: {signif(ratio_rpk, 3)}",
+      "Count CDS: {signif(count_cds, 3)}  Count UTR: {signif(count_utrs, 3)} (three significant figures)",
+      .sep = "\n"
+    )
+  ) %>%
+  # filter(transcript_id == "Sendai_N_gene") %>%
+  ggplot(
+    aes(
+      time_point_plot,
+      ratio_rpk,
+      color = medium,
+      text = hovertext
+    )
+  ) +
+    scale_x_discrete(
+      limits = levels(time_course_samples$time_point_plot),
+      labels = \(x) str_replace(x, "_", "")
+    ) +
+    geom_rect(
+      aes(
+        xmin = stage(start, after_stat = xmin - .5),
+        xmax = stage(end, after_stat = xmax + .5),
+        fill = stage
+      ),
+      data = stage_markers,
+      alpha = 0.3,
+      ymin = -Inf, ymax = Inf,
+      inherit.aes = FALSE,
+      show.legend = FALSE
+    ) +
+    scale_fill_brewer(palette = "Pastel2") +
+    geom_quasirandom(
+      aes(shape = study_name, group = medium, alpha = count_low),
+      dodge.width = .5
+    ) +
+    scale_alpha_manual(
+      values = c(`TRUE` = 0.2, `FALSE` = 1)
+    ) +
+    geom_text(
+      aes(
+        xmin = start, xmax = end, x = after_stat(.5 * (xmin + xmax)), label = stage
+      ),
+      data = stage_markers %>%
+        mutate(
+          stage = str_replace(stage, " ", "\n")
+        ),
+      y = STAGE_Y_POS,
+      size = 3,
+      hjust = .5, vjust = 1,
+      inherit.aes = FALSE
+    ) +
+    # ggnewscale::new_scale_color() +
+    geom_line(
+      aes(
+        x = time_point_plot,
+        y = ratio_rpk,
+        group = medium,
+        color = medium
+      ),
+      data = line_set_data,
+      inherit.aes = FALSE,
+      # color = "black",
+      alpha = 0.8
+    ) +
+    # geom_segment(
+    #   aes(
+    #     x = stage(time_point_plot, after_stat = x - .1),
+    #     xend = stage(time_point_plot, after_stat = x + .1),
+    #     y = tpm, yend = tpm,
+    #     color = medium
+    #   ),
+    #   data = line_set_data %>%
+    #     filter(!(time_point_plot == "D7" & !is.na(medium))) %>%
+    #     mutate(
+    #       tpm = tpm + 0.005
+    #     ),
+    #   inherit.aes = FALSE,
+    #   # color = "black",
+    #   alpha = 0.8
+    # ) +
+    scale_color_hue(
+      breaks = na.omit(unique(time_course_data$medium)),
+      na.value = "black"
+    ) +
+    geom_hline(
+      yintercept = 0.005,
+      color = "black",
+      linetype = "dashed"
+    ) +
+    theme_minimal() +
+    scale_y_log10(
+      labels = scales::trans_format("log10", scales::label_math(10^.x)),
+      expand = expansion(mult = c(0, 0.15))
+    ) +
+    facet_wrap(~gene_name) +
+    theme(plot.background = element_rect(fill = "white", color = NA)) +
+    coord_cartesian(clip = "off") +
+    labs(y = "CDS / UTR Ratio", x = NULL, shape = "Source", color = "Medium")
+
+ggsave(
+  here("plots", "sendai_time_course_log.pdf"),
+  p,
+  width = 8.5, height = 3
+)
+
+
+plt <- plotly::ggplotly(p, tooltip = "text")
+rmarkdown::find_pandoc(dir = "/usr/local/bin")
+htmlwidgets::saveWidget(
+  plt,
+  here("plots", "sendai_time_course_log.html"),
+  selfcontained = TRUE
+)
+
+```
+
 
 ```{r}
 yamanaka_factors <- c("KLF4", "MYC", "POU5F1", "SOX2")
