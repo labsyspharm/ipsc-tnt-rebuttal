@@ -7,6 +7,7 @@
 #SBATCH -o logs/%x_%j.out                 # File to which STDOUT will be written, including job ID (%j)
 #SBATCH -e logs/%x_%j.err                 # File to which STDERR will be written, including job ID (%j)
 
+# comm -1 -3 <(find star -name '*_Aligned.out_sorted.bam' | xargs basename -a | sed s/_Aligned.out_sorted.bam//g | sort | uniq) <(find star -name '*_Aligned.out.bam' | xargs basename -a | sed s/_Aligned.out.bam//g | sort | uniq)  |
 
 set -eu
 module load gcc/9.2.0 samtools/1.15.1
