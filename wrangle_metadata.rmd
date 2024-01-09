@@ -23,7 +23,10 @@ projects <- tribble(
   ~study_name, ~study_accession, ~geo_accession,
   "Liu Nature 2020", "SRP259918", "GSE149694",
   "Buckberry Nature 2023", "SRP286549", "GSE159114",
-  "Liu Nat Met 2017", "SRP115256", NA
+  "Liu Nat Met 2017", "SRP115256", NA,
+  "Ji CSC 2016", "SRP059279", "GSE69692",
+  "Bayerl CSC 2021", "SRP262162", "GSE150772",
+  "Pastor CSC 2016", "SRP068579", "GSE76970"
 )
 
 run_metadata_fastqdl <- projects %>%
@@ -123,7 +126,7 @@ original_filenames_trimmed <- original_filenames %>%
   mutate(
     trimmed = str_replace(
       filename,
-      "(_L[0-9]+|_lane_[0-9]+)?_R[12](_001)?\\.fastq\\.gz",
+      "(_L[0-9]+|_lane_[0-9]+)?((_|\\.)R?[12])?(_001)?\\.fastq(\\.gz)?",
       ""
     )
   ) %>%
@@ -140,6 +143,63 @@ go to Biosample manually and get the xml files
 https://www.ncbi.nlm.nih.gov/biosample?Db=biosample&DbFrom=bioproject&Cmd=Link&LinkName=bioproject_biosample&LinkReadableName=BioSample&ordinalpos=1&IdsFromResult=667717
 https://www.ncbi.nlm.nih.gov/biosample?Db=biosample&DbFrom=bioproject&Cmd=Link&LinkName=bioproject_biosample&LinkReadableName=BioSample&ordinalpos=1&IdsFromResult=629766
 https://www.ncbi.nlm.nih.gov/biosample?Db=biosample&DbFrom=bioproject&Cmd=Link&LinkName=bioproject_biosample&LinkReadableName=BioSample&ordinalpos=1&IdsFromResult=397941
+
+
+```{r}
+dir.create(here("raw", "sample_meta"))
+sample_meta_xml <- run_metadata_fastqdl %>%
+  distinct(study_accession, biosample) %>%
+  group_nest(study_accession) %>%
+  mutate(
+    sample_meta = map(
+      data,
+      \(x) processx::run(
+        "efetch",
+        c(
+          "-db", "biosample", "-format", "xml",
+          "-id", paste(x$biosample, collapse = ",")
+        ),
+      )
+    )
+  )
+
+pwalk(
+  sample_meta_xml,
+  \(sample_meta, study_accession, ...) {
+    write_file(
+      sample_meta$stdout,
+      here("raw", "sample_meta", paste0(study_accession, ".xml"))
+    )
+  }
+)
+```
+
+
+Buckberry samples are most likely mislabeled in SRA. Based on their filenames
+we can try to reconstruct their actual identity.
+
+The `title` column is completely wrong. Discarding it. `source_name` and `treatment`
+are shifted.
+
+The correct labels are manually curated from the file names.
+
+```{r}
+buckberry_manual_labels <- tibble::tribble(
+  ~biosample, ~biosample_correct, ~time_point,
+  "SAMN16380671", "SAMN16380671", "P13 + 20",
+  "SAMN16380670", "SAMN16380670", "P13 + 14",
+  "SAMN16380669", "SAMN16380669", "P15",
+  "SAMN16380668", "SAMN16380668", "P17",
+  "SAMN16380667", "SAMN16380667", "P18",
+  "SAMN16380666", "SAMN16380666", "P17",
+  "SAMN16380665", "SAMN16380665", "P16",
+  "SAMN16380664", "SAMN16380664", "P8",
+  "SAMN16380663", "SAMN16380662", "P20 + 3",
+  "SAMN16380662", "SAMN16380661", "P4 + 19",
+  "SAMN16380661", "SAMN16380656", "P9 + 13",
+  "SAMN16380656", "SAMN16380663", "P15"
+)
+```
 
 ```{r}
 read_biosample_xml <- function(file) {
@@ -175,12 +235,22 @@ read_biosample_xml <- function(file) {
 }
 
 biosample_meta_raw <- bind_rows(
-  read_biosample_xml(here("raw", "SRP286549", "biosample_result.xml")) %>%
+  read_biosample_xml(here("raw", "sample_meta", "SRP286549.xml")) %>%
     transmute(
-      biosample = BioSample, GEO, title, source_name,
-      background, treatment
-    ),
-  read_biosample_xml(here("raw", "SRP259918", "biosample_result.xml")) %>%
+      biosample = BioSample, GEO, source_name,
+      background, treatment,
+    ) %>%
+    inner_join(
+      buckberry_manual_labels,
+      by = "biosample"
+    ) %>%
+    mutate(
+      treatment = treatment[match(biosample_correct, biosample)] %>%
+        recode(`Control` = "Control ESC"),
+      source_name = source_name[match(biosample_correct, biosample)]
+    ) %>%
+    select(-biosample_correct),
+  read_biosample_xml(here("raw", "sample_meta", "SRP259918.xml")) %>%
     separate(
       `cell subtype/time point`,
       into = c("treatment", "time_point"),
@@ -193,7 +263,7 @@ biosample_meta_raw <- bind_rows(
       treatment,
       time_point
     ),
-  read_biosample_xml(here("raw", "SRP115256", "biosample_result.xml")) %>%
+  read_biosample_xml(here("raw", "sample_meta", "SRP115256.xml")) %>%
     transmute(
       biosample = BioSample, title, source_name = `NA`,
       tissue, age, isolate
@@ -208,30 +278,29 @@ biosample_meta_raw <- bind_rows(
       treatment = str_replace(treatment, " replicate [12]", "") %>%
         str_replace("^r", ""),
       time_point = str_replace(time_point, "plus", "+")
+    ),
+  read_biosample_xml(here("raw", "sample_meta", "SRP059279.xml")) %>%
+    transmute(
+      biosample = BioSample, title, source_name,
+      cell_type = `cell type`
+    ),
+  read_biosample_xml(here("raw", "sample_meta", "SRP262162.xml")) %>%
+    transmute(
+      biosample = BioSample, title, source_name,
+      background = `cell line`, treatment = `culture conditions`, batch
+    ),
+  read_biosample_xml(here("raw", "sample_meta", "SRP068579.xml")) %>%
+    filter(`library type` == "Ovation RNASeq System V2") %>%
+    transmute(
+      biosample = BioSample, title, source_name,
+      time_point = paste0("P", str_replace(`passage number`, "Passage ", ""))
     )
 )
 ```
 
-Buckberry samples are most likely mislabeled in SRA. Based on their filenames
-we can try to reconstruct their actual identity
+
 
 ```{r}
-buckberry_manual_labels <- tibble::tribble(
-  ~biosample, ~treatment, ~time_point_manual,
-  "SAMN16380671", "Control ESC", "P13 + 20",
-  "SAMN16380670", "Control ESC", "P13 + 14",
-  "SAMN16380669",       "Naïve", "P15",
-  "SAMN16380668",      "Primed", "P17",
-  "SAMN16380667",      "Primed", "P18",
-  "SAMN16380666",         "TNT", "P17",
-  "SAMN16380665",         "TNT", "P16",
-  "SAMN16380664",  "Fibroblast", "P8",
-  "SAMN16380663",  "Fibroblast", "P20 + 3",
-  "SAMN16380662",         "NtP", "P4 + 19",
-  "SAMN16380661",         "NtP", "P9 + 13",
-  "SAMN16380656",       "Naïve", "P15"
-)
-
 biosample_meta <- biosample_meta_raw %>%
   rename(
     treatment_original = treatment
