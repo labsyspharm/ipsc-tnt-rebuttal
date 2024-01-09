@@ -26,14 +26,17 @@ syn <- synDownloader("~/data", .cache = TRUE)
 
 ```{r}
 inputs <- c(
-  sample_meta = "syn53061904"
+  sample_meta = "syn53061904",
+  size_factors = "syn53061911",
+  run_metadata_fastqdl = "syn53061902"
 )
 
 input_files <- map(
   inputs, syn
 )
 sample_meta <- read_csv(input_files[["sample_meta"]])
-
+size_factors <- read_csv(input_files[["size_factors"]])
+run_meta <- read_csv(input_files[["run_metadata_fastqdl"]])
 ```
 
 ```{r}
@@ -60,9 +63,7 @@ transcript_gene_map <- ensembl_genes %>%
 
 ```{r}
 yamanaka_factors <- c("KLF4", "MYC", "POU5F1", "SOX2")
-```
 
-```{r}
 yamanaka_gtf <- ensembl_gtf[
   ensembl_gtf$gene_name %in% yamanaka_factors &
     replace_na(str_detect(ensembl_gtf$tag, "MANE_Select"), FALSE)
@@ -76,51 +77,342 @@ yamanaka_cds <- yamanaka_gtf[
   yamanaka_gtf$type == "CDS"
 ] %>%
   S4Vectors::split(.$gene_id)
+
+# BSgenome::getSeq(
+#   BSgenome.Hsapiens.NCBI.GRCh38::BSgenome.Hsapiens.NCBI.GRCh38,
+#   yamanaka_utrs,
+#   as.character = TRUE
+# )
+
+# BSgenome::getSeq(
+#   BSgenome.Hsapiens.NCBI.GRCh38::BSgenome.Hsapiens.NCBI.GRCh38,
+#   yamanaka_cds,
+#   as.character = TRUE
+# )
 ```
 
 
 ```{r}
 bam_files <- sample_meta %>%
-  select(sample_accession) %>%
+  power_left_join(
+    run_meta %>%
+      distinct(sample_accession, library_layout),
+    by = "sample_accession",
+    check = check_specs(
+      unmatched_keys_left = "warn",
+      unmatched_keys_right = "warn",
+      duplicate_keys_right = "warn"
+    )
+  ) %>%
   mutate(
     bam_path = file.path("star", paste0(sample_accession, "_Aligned.out_sorted.bam")),
-    bam_exists = file.exists(bam_path)
+    bam_exists = file.exists(bam_path),
+    paired = library_layout == "PAIRED"
   )
 
-bam_file_list <- Rsamtools::BamFileList(
-  bam_files %>%
-    filter(bam_exists) %>%
-    pull(bam_path),
-  yieldSize = 100000,
-  asMates = TRUE
-)
+# bam_file_list <- Rsamtools::BamFileList(
+#   bam_files %>%
+#     filter(bam_exists) %>%
+#     pull(bam_path),
+#   yieldSize = 50000,
+#   asMates = TRUE
+# )
 
-BiocParallel::register(BiocParallel::MulticoreParam(workers = 4, progressbar = TRUE))
-yamanaka_utr_counts <- GenomicAlignments::summarizeOverlaps(
-  yamanaka_utrs,
-  bam_file_list,
-  mode = "Union",
-  ignore.strand = TRUE,
-  singleEnd = FALSE,
-  fragments = FALSE
-)
+library(Rsubread)
 
-yamanaka_cds_counts <- GenomicAlignments::summarizeOverlaps(
-  yamanaka_cds,
-  bam_file_list,
-  mode = "IntersectionStrict",
-  ignore.strand = TRUE,
-  singleEnd = FALSE,
-  fragments = FALSE
+feature_count_jobs <- bam_files %>%
+  filter(bam_exists) %>%
+  cross_join(
+    tribble(
+      ~feature_name, ~feature_annotation,
+      "utrs", yamanaka_utrs %>%
+        as_tibble() %>%
+        transmute(
+          GeneID = 1:n(), Chr = seqnames, Start = start, End = end, Strand = strand
+        ),
+      "cds", yamanaka_cds %>%
+        as_tibble() %>%
+        transmute(
+          GeneID = group_name, Chr = seqnames, Start = start, End = end, Strand = strand
+        )
+    )
+  ) %>%
+  group_nest(
+    paired, feature_name, feature_annotation
+  )
+
+feature_count_res <- feature_count_jobs %>%
+  mutate(
+    res = pmap(
+      list(feature_annotation, paired, data),
+      \(annot, paired, samples) {
+        featureCounts(
+          files = samples %>%
+            filter(bam_exists) %>%
+            pull(bam_path),
+          annot.ext = annot,
+          isPairedEnd = paired,
+          nthreads = 6,
+          minOverlap = 5
+        )
+      }
+    )
+  )
+
+library(qs)
+dir.create(here("results"))
+qsave(
+  feature_count_res,
+  here("results", "yamanaka_feature_counts_raw.qs")
 )
+# feature_count_res <- qread(here("results", "yamanaka_feature_counts_raw.qs"))
+
+feature_counts <- feature_count_res %>%
+  select(-feature_annotation, -paired, -data) %>%
+  inner_join(
+    tribble(
+      ~feature_name, ~feature_meta,
+      "utrs", yamanaka_utrs %>%
+        as_tibble() %>%
+        transmute(
+          feature_id = as.character(1:n()),
+          type, gene_id, gene_name
+        ),
+      "cds", yamanaka_cds %>%
+        as_tibble() %>%
+        distinct(
+          feature_id = group_name,
+          type, gene_id, gene_name
+        )
+    )
+  ) %>%
+  mutate(
+    res = map2(
+      res, feature_meta,
+      \(res, meta) {
+        res[["counts"]] %>%
+          as_tibble(rownames = "feature_id") %>%
+          pivot_longer(
+            -feature_id,
+            names_to = "sample_accession",
+            values_to = "count"
+          ) %>%
+          mutate(
+            across(sample_accession, \(x) str_replace(x, "_Aligned.out_sorted.bam", ""))
+          ) %>%
+          power_inner_join(
+            meta,
+            by = "feature_id",
+            check = check_specs(
+              unmatched_keys_left = "warn",
+              unmatched_keys_right = "warn",
+              duplicate_keys_right = "warn"
+            )
+          )
+      }
+    )
+  ) %>%
+  select(-feature_meta) %>%
+  unnest(res) %>%
+  select(-feature_id) %>%
+  power_inner_join(
+    size_factors,
+    by = "sample_accession",
+    check = check_specs(
+      unmatched_keys_left = "warn",
+      unmatched_keys_right = "warn",
+      duplicate_keys_right = "warn"
+    )
+  ) %>%
+  mutate(
+    normalized_count = count / size_factor
+  )
+
+write_csv(
+  feature_counts,
+  here("results", "yamanaka_feature_counts_star.csv.gz")
+)
+```
+
+```{r}
+# bam_file_list <- Rsamtools::BamViews(
+#   bam_files %>%
+#     filter(bam_exists) %>%
+#     pull(bam_path),
+#   bamRanges = yamanaka_utrs
+# )
+
+# BiocParallel::register(BiocParallel::MulticoreParam(workers = 6, progressbar = TRUE))
+# yamanaka_utr_counts <- GenomicAlignments::summarizeOverlaps(
+#   bam_file_list,
+#   mode = "Union",
+#   ignore.strand = TRUE,
+#   singleEnd = FALSE,
+#   fragments = TRUE
+# )
+
+# yamanaka_cds_counts <- GenomicAlignments::summarizeOverlaps(
+#   yamanaka_cds,
+#   bam_file_list,
+#   mode = "IntersectionStrict",
+#   ignore.strand = TRUE,
+#   singleEnd = FALSE,
+#   fragments = TRUE
+# )
+
+
+# library(qs)
+# dir.create(here("results"))
+# qsave(
+#   list(
+#     yamanaka_utr_counts = yamanaka_utr_counts,
+#     yamanaka_cds_counts = yamanaka_cds_counts
+#   ),
+#   here("results", "yamanaka_counts.qs")
+# )
+
+# yamanaka_utr_count_df <- yamanaka_utr_counts %>%
+#   SummarizedExperiment::rowData() %>%
+#   as_tibble() %>%
+#   select(gene_id, transcript_id, gene_name, type) %>%
+#   bind_cols(
+#     as_tibble(SummarizedExperiment::assay(yamanaka_utr_counts))
+#   ) %>%
+#   pivot_longer(
+#     -c(gene_id, transcript_id, gene_name, type),
+#     names_to = "sample_accession",
+#     values_to = "count"
+#   ) %>%
+#   mutate(
+#     across(sample_accession, \(x) str_replace(x, "_Aligned.out_sorted.bam", ""))
+#   ) %>%
+#   power_inner_join(
+#     size_factors,
+#     by = "sample_accession",
+#     check = check_specs(
+#       unmatched_keys_left = "warn",
+#       unmatched_keys_right = "warn",
+#       duplicate_keys_right = "warn"
+#     )
+#   ) %>%
+#   mutate(
+#     normalized_count = count / size_factor
+#   )
+
+# yamanaka_cds_count_df <- SummarizedExperiment::assay(yamanaka_cds_counts) %>%
+#   as_tibble(rownames = "gene_id") %>%
+#   inner_join(
+#     ensembl_genes %>%
+#       distinct(gene_id, gene_name),
+#     by = "gene_id"
+#   ) %>%
+#   pivot_longer(
+#     -c(gene_id, gene_name),
+#     names_to = "sample_accession",
+#     values_to = "count"
+#   ) %>%
+#   mutate(
+#     across(sample_accession, \(x) str_replace(x, "_Aligned.out_sorted.bam", ""))
+#   ) %>%
+#   power_inner_join(
+#     size_factors,
+#     by = "sample_accession",
+#     check = check_specs(
+#       unmatched_keys_left = "warn",
+#       unmatched_keys_right = "warn",
+#       duplicate_keys_right = "warn"
+#     )
+#   ) %>%
+#   mutate(
+#     normalized_count = count / size_factor
+#   )
+
+
+# write_csv(
+#   yamanaka_utr_count_df,
+#   here("results", "yamanaka_utr_counts.csv.gz")
+# )
+
+# write_csv(
+#   yamanaka_cds_count_df,
+#   here("results", "yamanaka_cds_counts.csv.gz")
+# )
+
+# yamanaka_ratios <- yamanaka_utr_count_df %>%
+#   group_by(gene_id, transcript_id, gene_name, sample_accession) %>%
+#   summarize(
+#     across(
+#       c(count, normalized_count),
+#       sum
+#     ),
+#     .groups = "drop"
+#   ) %>%
+#   pivot_longer(
+#     c(count, normalized_count),
+#     names_to = "count_type",
+#     values_to = "count_utr"
+#   ) %>%
+#   power_inner_join(
+#     yamanaka_cds_count_df %>%
+#       select(sample_accession, gene_id, count, normalized_count) %>%
+#       pivot_longer(
+#         c(count, normalized_count),
+#         names_to = "count_type",
+#         values_to = "count_cds"
+#       ),
+#     by = c("gene_id", "sample_accession", "count_type"),
+#     check = check_specs(
+#       unmatched_keys_left = "warn",
+#       unmatched_keys_right = "warn",
+#       duplicate_keys_right = "warn"
+#     )
+#   ) %>%
+#   mutate(
+#     ratio = count_cds / count_utr
+#   )
 
 ```
 
+```{r}
+yamanaka_ratios <- feature_counts %>%
+  group_by(feature_name, sample_accession, gene_id, gene_name) %>%
+  summarize(
+    across(
+      c(count, normalized_count),
+      sum
+    ),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    c(count, normalized_count),
+    names_to = "count_type",
+    values_to = "count"
+  ) %>%
+  pivot_wider(
+    names_from = feature_name,
+    values_from = count,
+    names_prefix = "count_"
+  ) %>%
+  mutate(
+    ratio = count_cds / count_utrs
+  )
 
+write_csv(
+  yamanaka_ratios,
+  here("results", "yamanaka_ratios_star.csv.gz")
+)
+```
 
 ```{r}
-yamanaka_regions <- yamanaka_gtf[yamanaka_gtf$type == "gene"]
-start(yamanaka_regions) <- start(yamanaka_regions) - 1000
-end(yamanaka_regions) <- end(yamanaka_regions) + 1000
+synStoreMany(
+  c(
+    here("results", "yamanaka_feature_counts_raw.qs"),
+    here("results", "yamanaka_feature_counts_star.csv.gz"),
+    here("results", "yamanaka_ratios_star.csv.gz")
+  ),
+  parentId = "syn53061909",
+  used = unname(inputs),
+  forceVersion = FALSE
+)
 
 ```
