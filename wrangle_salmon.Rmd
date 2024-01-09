@@ -12,6 +12,7 @@ library(powerjoin)
 library(data.table)
 library(synExtra)
 library(tximport)
+library(qs)
 
 synapser::synLogin()
 
@@ -73,6 +74,11 @@ salmon_quant <- tximport(
   ignoreTxVersion = TRUE
 )
 
+qsave(
+  salmon_quant,
+  here("quants", "salmon_quant_raw.qs")
+)
+
 salmon_tpm <- salmon_quant[c("abundance", "counts")] %>%
   imap(
     \(mat, n) as_tibble(mat, rownames = "transcript_id") %>%
@@ -105,6 +111,11 @@ salmon_gene_quant <- tximport(
   type = "salmon", txOut = FALSE,
   tx2gene = select(transcript_gene_map, transcript_id, gene_id),
   ignoreTxVersion = TRUE
+)
+
+qsave(
+  salmon_gene_quant,
+  here("quants", "salmon_gene_quant_raw.qs")
 )
 
 salmon_gene_tpm <- salmon_gene_quant[c("abundance", "counts")] %>%
@@ -152,7 +163,71 @@ quants_dir_syn <- synMkdir(
 synStoreMany(
   c(
     here("quants", "salmon_tpm.csv.gz"),
-    here("quants", "size_factors.csv")
+    here("quants", "salmon_gene_tpm.csv.gz"),
+    here("quants", "size_factors.csv"),
+    here("quants", "salmon_quant_raw.qs"),
+    here("quants", "salmon_gene_quant_raw.qs")
+  ),
+  parentId = quants_dir_syn,
+  forceVersion = FALSE
+)
+
+```
+
+## Yamanaka ratio quantification
+
+```{r}
+
+salmon_files <- Sys.glob("quants_yamanaka/*/quant.sf") %>%
+  set_names(str_split_fixed(., fixed("/"), 3)[, 2])
+
+salmon_quant <- tximport(
+  salmon_files,
+  type = "salmon", txOut = TRUE,
+  ignoreTxVersion = TRUE
+)
+
+qsave(
+  salmon_quant,
+  here("quants", "salmon_quant_yamanaka_variants_raw.qs")
+)
+
+salmon_tpm <- salmon_quant[c("abundance", "counts")] %>%
+  imap(
+    \(mat, n) as_tibble(mat, rownames = "transcript_id") %>%
+      pivot_longer(
+        -transcript_id,
+        names_to = "sample_accession", values_to = n
+      )
+  ) %>%
+  reduce(left_join) %>%
+  # Remove transcript version
+  mutate(
+    transcript_id = str_remove(transcript_id, "\\.\\d+$")
+  ) %>%
+  rename(
+    tpm = abundance,
+    count = counts
+  )
+
+write_csv(
+  salmon_tpm,
+  here("quants", "salmon_tpm_yamanaka_variants.csv.gz")
+)
+
+
+```
+
+
+```{r}
+quants_dir_syn <- synMkdir(
+  "syn53061839", "quants"
+)
+
+synStoreMany(
+  c(
+    here("quants", "salmon_tpm_yamanaka_variants.csv.gz"),
+    here("quants", "salmon_quant_yamanaka_variants_raw.qs")
   ),
   parentId = quants_dir_syn,
   forceVersion = FALSE
