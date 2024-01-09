@@ -218,7 +218,7 @@ time_course_samples <- tribble(
       ) %>%
       distinct(time_point, treatment) %>%
       mutate(
-        time_point_plot = time_point,
+        time_point_plot = recode(time_point, P10 = "P10-12", P12 = "P10-12", P15 = "P15-21", P17 = "P15-21", P18 = "P15-21", P21 = "P15-21"),
         sample_group = "Naïve"
       )
   ) %>%
@@ -230,8 +230,19 @@ time_course_samples <- tribble(
       ) %>%
       distinct(time_point, treatment) %>%
       mutate(
-        time_point_plot = time_point,
+        time_point_plot = recode(time_point, P10 = "P10-12", P12 = "P10-12", P15 = "P15-21", P17 = "P15-21", P18 = "P15-21", P21 = "P15-21"),
         sample_group = "Primed"
+      )
+  ) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("NtP")
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = "NtP",
+        sample_group = "NtP"
       )
   ) %>%
   bind_rows(
@@ -264,20 +275,21 @@ time_course_samples <- tribble(
           x,
           y %>%
             pull(time_point) %>%
-            c("ESC") %>%
+            c("NtP", "ESC") %>%
             unique()
         )
       }
     ),
     medium = case_when(
       treatment %in% c("5iLAF", "NHSM", "t2iLGoY", "RSeT") ~ treatment,
-      treatment %in% c("Primed") & !sample_group == "ESC" ~ "Primed medium (?)",
+      treatment %in% c("Primed", "NtP") & !sample_group == "ESC" ~ "Primed medium (?)",
       TRUE ~ NA_character_
     ),
     stage = case_when(
       sample_group %in% c("Fibroblast") ~ "Fibroblast",
       sample_group %in% c("Sendai Reprogramming") ~ "Sendai Reprogramming",
       sample_group %in% c("Naïve", "Primed") ~ "Naïve/Primed",
+      sample_group %in% c("NtP") ~ "NtP",
       sample_group %in% c("ESC") ~ "ESC",
       TRUE ~ NA_character_
     )
@@ -610,6 +622,10 @@ p <- time_course_data %>%
       limits = levels(time_course_samples$time_point_plot),
       labels = \(x) str_replace(x, "_", "")
     ) +
+    geom_hline(
+      yintercept = 1,
+      color = "black"
+    ) +
     geom_rect(
       aes(
         xmin = stage(start, after_stat = xmin - .5),
@@ -676,25 +692,26 @@ p <- time_course_data %>%
       breaks = na.omit(unique(time_course_data$medium)),
       na.value = "black"
     ) +
-    geom_hline(
-      yintercept = 0.005,
-      color = "black",
-      linetype = "dashed"
-    ) +
     theme_minimal() +
     scale_y_log10(
       labels = scales::trans_format("log10", scales::label_math(10^.x)),
       expand = expansion(mult = c(0, 0.15))
     ) +
     facet_wrap(~gene_name) +
-    theme(plot.background = element_rect(fill = "white", color = NA)) +
+    theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      strip.background = element_rect(fill = "gray92", color = NA)
+    ) +
     coord_cartesian(clip = "off") +
-    labs(y = "CDS / UTR Ratio", x = NULL, shape = "Source", color = "Medium")
+    labs(
+      y = "CDS / UTR Ratio", x = NULL, shape = "Source",
+      color = "Medium", alpha = "Low count (<50)"
+    )
 
 ggsave(
-  here("plots", "sendai_time_course_log.pdf"),
+  here("plots", "cds_utr_time_course_log.pdf"),
   p,
-  width = 8.5, height = 3
+  width = 9, height = 4.5
 )
 
 
