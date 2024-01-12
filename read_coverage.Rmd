@@ -1,0 +1,233 @@
+---
+title: "Read coverage Sendai and Yamanaka"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(tidyverse)
+library(powerjoin)
+library(data.table)
+library(synExtra)
+library(ggcoverage)
+library(Rsamtools)
+library(ggbio)
+
+synapser::synLogin()
+
+theme_set(theme_minimal(base_family = "Helvetica"))
+
+syn <- synDownloader("~/data", .cache = TRUE)
+```
+
+```{r}
+inputs <- c(
+  sample_meta = "syn53061904"
+)
+
+input_files <- map(
+  inputs, syn
+)
+
+sample_meta <- read_csv(input_files[["sample_meta"]])
+```
+
+
+```{r}
+samples_sendai <- sample_meta %>%
+  filter(
+    study_name == "Buckberry Nature 2023",
+    treatment %in% c("NtP", "Naïve", "Primed", "Control ESC")
+  )
+
+```
+
+```{r}
+sendai_region <- "pSeV-idSOX2-Pmut:1150-19976"
+
+sendai_plot_data <- samples_sendai %>%
+  mutate(
+    bam_name = paste0(sample_accession, "_Aligned.out_sorted"),
+    bam_path = file.path("star", paste0(bam_name, ".bam")),
+    bam_obj = map(
+      bam_path, BamFile
+    ),
+    n_mapped = map_int(
+      bam_obj,
+      \(x) idxstatsBam(x)$mapped %>%
+        sum()
+    )
+  )
+all(file.exists(sendai_plot_data$bam_path))
+
+sendai_bam_meta <- sendai_plot_data %>%
+  transmute(
+    sample_accession,
+    SampleName = bam_name,
+    Type = sample_accession,
+    Group = treatment
+  )
+
+sendai_bam_tracks <- LoadTrackFile(
+  sendai_plot_data$bam_path,
+  format = "bam",
+  region = sendai_region,
+  meta.info = sendai_bam_meta,
+  norm.method = "None",
+  extend = 0,
+  bin.size = 50,
+  # bc.extra.para = "--effectiveGenomeSize 2913022398"
+) %>%
+  as_tibble() %>%
+  left_join(
+    sendai_plot_data %>%
+      select(where(negate(is.list))),
+    by = c("sample_accession")
+  ) %>%
+  mutate(
+    score_raw = score,
+    score = score * 1e6 / n_mapped
+  )
+
+sendai_gene_df <- tribble(
+  ~symbol, ~start, ~end,
+  "N gene", 1202, 2884,
+  "P gene", 2888, 4570,
+  "M gene", 4606, 5652,
+  "F gene", 5803, 7500,
+  "HN gene", 7630, 9353,
+  "L gene", 9493, 16219
+) %>%
+  mutate(
+    seqname = "pSeV-idSOX2-Pmut",
+    strand = "+",
+    type = "gene",
+    gene_name = symbol,
+    gene_type = "protein_coding"
+  )
+
+sendai_gene_granges <- GenomicRanges::makeGRangesFromDataFrame(
+  sendai_gene_df,
+  keep.extra.columns = TRUE
+)
+
+sendai_gene_glist <- GenomicRanges::makeGRangesListFromDataFrame(
+  mutate(
+    sendai_gene_df,
+    type = "exon"
+  ),
+  keep.extra.columns = TRUE,
+  split.field = "gene_name"
+)
+```
+
+```{r}
+sendai_gene_plot <- ggplot() +
+  geom_alignment(
+    sendai_gene_glist,
+    # aes(
+    #   y = ypos
+    # ),
+    range.geom = "arrow",
+    cds.rect.h = 0.1
+  )
+
+sendai_coverage_plot <- ggplot(
+  sendai_bam_tracks %>%
+    pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos") %>%
+    group_by(treatment) %>%
+    mutate(
+      rep = factor(
+        sample_accession, labels = c("1", " 2")
+      )
+    ) %>%
+    ungroup(),
+  aes(
+    x = pos,
+    y = score,
+    color = rep,
+    fill = rep,
+    group = sample_accession
+  )
+) +
+  # geom_line() +
+  geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.5) +
+  facet_wrap(~treatment, ncol = 1) +
+  guides(
+    # color = "none",
+    # fill = "none"
+  ) +
+  # geom_gene(gene_granges) +
+  scale_y_log10(
+    labels = scales::label_log()
+  ) +
+  labs(
+    y = "CPM", color = "Replicate", fill = "Replicate"
+  ) +
+  theme(
+    panel.grid.minor.y = element_blank(),
+    legend.position = "top"
+  )
+
+sendai_combined <- tracks(
+  sendai_coverage_plot, sendai_gene_plot,
+  heights = c(1, 0.15)
+)
+
+xlim(sendai_combined) <- c(1150, 16000)
+
+withr::with_cairo_pdf(
+  "plots/sendai_coverage_tracks.pdf",
+  width = 6, height = 6,
+  {
+    print(sendai_combined)
+  }
+)
+
+ggbio::ggsave(
+  "test.pdf", p, width = 5, height = 2
+)
+
+p <- ggplot() + stat_gene(gene_glist)
+
+p <- ggplot(
+  bam_track %>%
+    pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos"),
+  aes(
+    x = pos,
+    y = score,
+    color = treatment,
+    group = sample_accession
+  )
+) +
+  geom_line() +
+  # geom_gene(gene_granges) +
+  scale_y_log10()
+
+ggsave(
+  "plots/sendai_coverage_2.pdf",
+  p, width = 10, height = 5
+)
+
+p2 <- ggcoverage(
+  bam_track,
+  # mapping = aes(color = Group),
+  plot.type = "joint"
+) +
+  geom_gene(gene_granges)
+
+ggsave(
+  "plots/sendai_coverage.pdf",
+  p2, width = 10, height = 10
+)
+
+p3 <- p2
+p3[[1]] <- p
+ggsave(
+  "plots/sendai_coverage3.pdf",
+  p3, width = 10, height = 10
+)
+```
+
