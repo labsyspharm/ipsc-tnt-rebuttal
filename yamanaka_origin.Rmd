@@ -167,8 +167,12 @@ salmon_yamanaka_ratios <- salmon_tpm_yamanaka %>%
     values_from = tpm
   ) %>%
   mutate(
-    ratio = no_utr / with_utr
+    ratio = no_utr / with_utr,
+    transcript_ratio = (with_utr + no_utr) / with_utr
   )
+
+# utr = with_utr
+# cds = with_utr + without_utr
 ```
 
 ```{r}
@@ -177,7 +181,7 @@ yamanaka_both_ratios <- yamanaka_ratios_rpk %>%
   rename(ratio_rpk = ratio) %>%
   power_inner_join(
     salmon_yamanaka_ratios %>%
-      rename(ratio_tpm = ratio),
+      rename(ratio_tpm = ratio, transcript_ratio_tpm = transcript_ratio),
     by = c("gene_name", "sample_accession"),
     check = check_specs(
       unmatched_keys_left = "warn",
@@ -221,6 +225,32 @@ p <- yamanaka_both_ratios %>%
     scale_x_log10() +
     scale_y_log10() +
     facet_wrap(~gene_name)
+
+p <- yamanaka_both_ratios %>%
+  mutate(
+    total_count = count_cds + count_utrs,
+    counts_low = total_count < 50
+  ) %>%
+  ggplot(
+    aes(x = ratio_rpk, y = transcript_ratio_tpm, color = counts_low)
+  ) +
+    geom_point() +
+    scale_color_manual(
+      values = c(`TRUE` = "gray", `FALSE` = "black")
+    ) +
+    scale_x_log10() +
+    scale_y_log10() +
+    coord_equal() +
+    facet_wrap(~gene_name) +
+    labs(
+      x = "CDS / UTR ratio STAR",
+      y = " CDS / UTR ratio Salmon"
+    )
+
+ggsave(
+  here("plots", "yamanaka_ratios_star_vs_salmon.pdf"),
+  p, width = 7, height = 4
+)
 ```
 
 
@@ -295,10 +325,21 @@ plot_samples <- sample_meta_edited %>%
         sample_group = "TNT P17/18"
       )
   ) %>%
+  bind_rows(
+    # NtP
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("NtP")
+      ) %>%
+      mutate(
+        time_point_plot = "P9/15",
+        sample_group = "NtP P9/15"
+      )
+  ) %>%
   mutate(
     sample_group = factor(
       sample_group,
-      levels = c("Fibroblast D0", "Primed P17/18", "TNT P17/18", "Naïve P15", "ESC")
+      levels = c("Fibroblast D0", "Primed P17/18", "TNT P17/18", "NtP P9/15", "Naïve P15", "ESC")
     ) %>%
       fct_relabel(\(x) str_replace(x, " ", "\n"))
   )
@@ -309,6 +350,9 @@ plot_data <- plot_samples %>%
     yamanaka_ratios_rpk %>%
       filter(
         count_type == "rpk"
+      ) %>%
+      mutate(
+        count_total = count_cds + count_utrs
       ),
     by = "sample_accession"
   )
@@ -325,9 +369,13 @@ baseline_data <- plot_data %>%
 
 RATIO_ADDED <- min(na.omit(plot_data$ratio)) / 2
 
+breaks <- 10^(-10:10)
+minor_breaks <- sort(unique(c(rep(1:9, 11)*(10^rep(0:10, each=9)), (10^rep(-10:0, each=9)) / rep(1:9, 11))))
+
 p <- plot_data %>%
   mutate(
-    ratio = if_else(!is.finite(ratio), RATIO_ADDED, ratio)
+    ratio = if_else(!is.finite(ratio), RATIO_ADDED, ratio),
+    counts_low = count_total < 30
   ) %>%
   ggplot(
     aes(x = sample_group, y = ratio, shape = study_name, color = study_name)
@@ -335,15 +383,167 @@ p <- plot_data %>%
   geom_hline(yintercept = RATIO_ADDED, linetype = "dashed") +
   geom_hline(
     aes(yintercept = ratio, color = study_name),
-    data = baseline_data,
-    guides = "none"
+    data = baseline_data
   ) +
-  geom_quasirandom() +
-  scale_y_log10() +
+  geom_quasirandom(
+    aes(alpha = counts_low)
+  ) +
+  scale_alpha_manual(values = c(`TRUE` = 0.3, `FALSE` = 0.9), guide = "none") +
+  scale_y_log10(breaks = c(0.1, 1, 10, 100, 1000), minor_breaks = NULL) +
   theme_linedraw() +
   facet_wrap(~gene_name) +
   labs(
     y = "CDS / UTR Ratio", x = NULL, shape = "Source", color = "Source"
   )
+
+ggsave(
+  here("plots", "yamanaka_ratios_select_samples_log_star_rpk.pdf"),
+  p, width = 8.5, height = 4
+)
+
+```
+
+
+```{r}
+
+plot_data_normalized <- plot_samples %>%
+  inner_join(
+    yamanaka_ratios_rpk %>%
+      filter(
+        count_type == "rpk"
+      ),
+    by = "sample_accession"
+  ) %>%
+  inner_join(
+    baseline_data %>%
+      select(-study_name) %>%
+      rename(ratio_baseline = ratio),
+    by = c("gene_name")
+  ) %>%
+  mutate(
+    ratio_normalized = ratio / ratio_baseline
+  )
+
+RATIO_ADDED <- min(na.omit(plot_data_normalized$ratio_normalized)) / 2
+breaks <- 10^(-10:10)
+minor_breaks <- rep(1:9, 21)*(10^rep(0:10, each=9))
+minor_breaks <- sort(unique(c(rep(1:9, 11)*(10^rep(0:10, each=9)), (10^rep(-10:0, each=9)) / rep(1:9, 11))))
+
+p <- plot_data_normalized %>%
+  mutate(
+    ratio_normalized = if_else(!is.finite(ratio_normalized), RATIO_ADDED, ratio_normalized)
+  ) %>%
+  ggplot(
+    aes(x = sample_group, y = ratio_normalized, shape = study_name, color = study_name)
+  ) +
+  geom_hline(yintercept = RATIO_ADDED, linetype = "dashed") +
+  geom_hline(
+    aes(yintercept = ratio_normalized, color = study_name),
+    data = tibble(gene_name = unique(plot_data_normalized$gene_name), ratio_normalized = 1, study_name = "Ji CSC 2016"),
+    guides = "none"
+  ) +
+  geom_quasirandom() +
+  scale_y_log10(breaks = breaks, minor_breaks = minor_breaks) +
+  theme_linedraw() +
+  facet_wrap(~gene_name) +
+  labs(
+    y = "CDS / UTR Ratio", x = NULL, shape = "Source", color = "Source"
+  )
+
+```
+
+```{r}
+
+plot_data <- plot_samples %>%
+  inner_join(
+    salmon_yamanaka_ratios,
+    by = "sample_accession"
+  )
+
+baseline_data <- plot_data %>%
+  filter(
+    study_name == "Ji CSC 2016"
+  ) %>%
+  group_by(gene_name, study_name) %>%
+  summarize(
+    across(c(with_utr, no_utr), mean),
+    .groups = "drop"
+  )
+
+COUNTS_ADDED <- min(na.omit(plot_data$no_utr)) / 2
+
+p <- plot_data %>%
+  # mutate(
+  #   no_utr = if_else(!is.finite(no_utr), COUNTS_ADDED, no_utr)
+  # ) %>%
+  ggplot(
+    aes(x = sample_group, y = no_utr, shape = study_name, color = study_name)
+  ) +
+  # geom_hline(yintercept = COUNTS_ADDED, linetype = "dashed") +
+  geom_hline(
+    aes(yintercept = no_utr, color = study_name),
+    data = baseline_data,
+    guides = "none"
+  ) +
+  geom_quasirandom() +
+  # geom_jitter() +
+  # scale_y_log10() +
+  theme_linedraw() +
+  ggh4x::facet_wrap2(~gene_name, scales = "free_y") +
+  labs(
+    y = "Exogenous expression (no UTR)", x = NULL, shape = "Source", color = "Source"
+  )
+
+```
+
+```{r}
+
+plot_data <- plot_samples %>%
+  inner_join(
+    salmon_yamanaka_ratios %>%
+      select(-ratio) %>%
+      pivot_longer(
+        c(with_utr, no_utr),
+        names_to = "feature_name",
+        values_to = "tpm"
+      ),
+    by = "sample_accession"
+  )
+
+baseline_data <- plot_data %>%
+  filter(
+    study_name == "Ji CSC 2016"
+  ) %>%
+  group_by(gene_name, study_name, feature_name) %>%
+  summarize(
+    across(c(tpm), mean),
+    .groups = "drop"
+  )
+
+COUNTS_ADDED <- min(na.omit(plot_data$tpm)) / 2
+
+p <- plot_data %>%
+  # mutate(
+  #   no_utr = if_else(!is.finite(no_utr), COUNTS_ADDED, no_utr)
+  # ) %>%
+  ggplot(
+    aes(x = sample_group, y = tpm, shape = study_name, color = feature_name)
+  ) +
+  # geom_hline(yintercept = COUNTS_ADDED, linetype = "dashed") +
+  geom_hline(
+    aes(yintercept = tpm, color = feature_name),
+    data = baseline_data,
+    guides = "none"
+  ) +
+  geom_quasirandom(aes(group = feature_name), dodge.width = 0.5) +
+  # geom_jitter() +
+  # scale_y_log10() +
+  theme_linedraw() +
+  ggh4x::facet_wrap2(~gene_name, scales = "free_y") +
+  labs(
+    y = "Exogenous expression (no UTR)", x = NULL, shape = "Source", color = "Source"
+  )
+
+
 ```
 
