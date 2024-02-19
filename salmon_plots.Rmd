@@ -89,8 +89,7 @@ ensembl_gtf %>%
 
 gene_id_gene_symbol_map <- ensembl_gtf %>%
   filter(type == "gene") %>%
-  drop_na(gene_name, gene_id) %>%
-  distinct(seqid, source, gene_id, gene_name)
+  distinct(gene_id, gene_name)
 
 transcript_gene_map <- ensembl_gtf %>%
   filter(type == "transcript") %>%
@@ -117,9 +116,13 @@ marker_genes <- tribble(
 
 ```{r}
 salmon_gene_quants_symbol <- salmon_gene_quants %>%
-  left_join(
+  power_inner_join(
     gene_id_gene_symbol_map,
-    by = "gene_id"
+    by = "gene_id",
+    check = check_specs(
+      unmatched_keys_left = "ignore",
+      duplicate_keys_right = "warn"
+    )
   )
 ```
 
@@ -249,7 +252,8 @@ time_course_samples <- tribble(
     sample_meta_edited %>%
       filter(
         treatment %in% c("Control ESC") |
-          (replace_na(tissue == "ESCs", FALSE) & treatment == "Primed")
+          (replace_na(tissue == "ESCs", FALSE) & treatment == "Primed") |
+          source_name == "5iLAF SSEA4- subpopulation UCLA1 hESCs"
       ) %>%
       distinct(time_point, treatment) %>%
       mutate(
@@ -468,6 +472,12 @@ p <- time_course_data %>%
       inherit.aes = FALSE,
       show.legend = FALSE
     ) +
+    geom_hline(
+      yintercept = 0.005,
+      color = "black",
+      linetype = "dashed",
+      alpha = 0.5
+    ) +
     scale_fill_brewer(palette = "Pastel2") +
     geom_quasirandom(
       aes(shape = study_name, group = medium),
@@ -521,11 +531,6 @@ p <- time_course_data %>%
     scale_color_hue(
       breaks = na.omit(unique(time_course_data$medium)),
       na.value = "black"
-    ) +
-    geom_hline(
-      yintercept = 0.005,
-      color = "black",
-      linetype = "dashed"
     ) +
     theme_minimal() +
     scale_y_log10(
