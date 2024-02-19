@@ -32,6 +32,11 @@ input_files <- map(
 )
 
 sample_meta <- read_csv(input_files[["sample_meta"]])
+
+ensembl_gtf <- rtracklayer::import(
+  here("index", "Homo_sapiens.GRCh38.110.gtf.gz")
+)
+
 ```
 
 
@@ -77,7 +82,7 @@ sendai_bam_tracks <- LoadTrackFile(
   meta.info = sendai_bam_meta,
   norm.method = "None",
   extend = 0,
-  bin.size = 50,
+  bin.size = 500,
   # bc.extra.para = "--effectiveGenomeSize 2913022398"
 ) %>%
   as_tibble() %>%
@@ -134,42 +139,72 @@ sendai_gene_plot <- ggplot() +
     cds.rect.h = 0.1
   )
 
+sendai_bam_coverage_long <- sendai_bam_tracks %>%
+  pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos") %>%
+  group_by(treatment) %>%
+  mutate(
+    rep = factor(
+      sample_accession, labels = c("1", " 2")
+    )
+  ) %>%
+  ungroup()
+
 sendai_coverage_plot <- ggplot(
-  sendai_bam_tracks %>%
-    pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos") %>%
-    group_by(treatment) %>%
+  sendai_bam_coverage_long %>%
     mutate(
-      rep = factor(
-        sample_accession, labels = c("1", " 2")
-      )
-    ) %>%
-    ungroup(),
+      score = pmax(score, 1e-8)
+    ),
   aes(
     x = pos,
     y = score,
-    color = rep,
     fill = rep,
     group = sample_accession
   )
 ) +
   # geom_line() +
-  geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.5) +
-  facet_wrap(~treatment, ncol = 1) +
+  # geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.5, line.width = NA, outline.type = "upper") +
+  # geom_step(alpha = 0.6) +
+  # geom_line(aes(y = score), alpha = 0.5) +
+  geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.6, outline.type = "upper", color = NA) +
+  ggh4x::facet_wrap2(~treatment, ncol = 1, strip.position = "right", axes = "all", remove_labels = "x") +
+  geom_text(
+    aes(x = -Inf, y = Inf, label = treatment),
+    data = distinct(sendai_bam_coverage_long, treatment),
+    inherit.aes = FALSE,
+    hjust = -.1, vjust = 1
+  ) +
   guides(
     # color = "none",
     # fill = "none"
   ) +
+  paletteer::scale_fill_paletteer_d("colorblindr::OkabeIto") +
   # geom_gene(gene_granges) +
   scale_y_log10(
-    labels = scales::label_log()
+    labels = scales::label_log(),
+    breaks = c(1e-3, 1e2),
+    limits = c(1e-3, 1e2),
+    expand = c(0, 0),
+    oob = scales::squish_infinite
   ) +
+  # scale_y_log10() +
   labs(
     y = "CPM", color = "Replicate", fill = "Replicate"
   ) +
+  theme_classic() +
   theme(
-    panel.grid.minor.y = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank(),
+    # axis.line.x = element_line(size = 1),
     legend.position = "top"
   )
+
+ggplot2::ggsave(
+  "plots/sendai_coverage_plot_raw.pdf",
+  sendai_coverage_plot,
+  width = 5, height = 4
+)
 
 sendai_combined <- tracks(
   sendai_coverage_plot, sendai_gene_plot,
@@ -180,54 +215,154 @@ xlim(sendai_combined) <- c(1150, 16000)
 
 withr::with_cairo_pdf(
   "plots/sendai_coverage_tracks.pdf",
-  width = 6, height = 6,
+  width = 5, height = 4,
   {
     print(sendai_combined)
   }
 )
-
-ggbio::ggsave(
-  "test.pdf", p, width = 5, height = 2
-)
-
-p <- ggplot() + stat_gene(gene_glist)
-
-p <- ggplot(
-  bam_track %>%
-    pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos"),
-  aes(
-    x = pos,
-    y = score,
-    color = treatment,
-    group = sample_accession
-  )
-) +
-  geom_line() +
-  # geom_gene(gene_granges) +
-  scale_y_log10()
-
-ggsave(
-  "plots/sendai_coverage_2.pdf",
-  p, width = 10, height = 5
-)
-
-p2 <- ggcoverage(
-  bam_track,
-  # mapping = aes(color = Group),
-  plot.type = "joint"
-) +
-  geom_gene(gene_granges)
-
-ggsave(
-  "plots/sendai_coverage.pdf",
-  p2, width = 10, height = 10
-)
-
-p3 <- p2
-p3[[1]] <- p
-ggsave(
-  "plots/sendai_coverage3.pdf",
-  p3, width = 10, height = 10
-)
 ```
 
+```{r}
+yamanaka_factors <- c("KLF4", "MYC", "POU5F1", "SOX2")
+
+yamanaka_gtf <- ensembl_gtf[
+  ensembl_gtf$gene_name %in% yamanaka_factors &
+    replace_na(str_detect(ensembl_gtf$tag, "MANE_Select"), FALSE)
+]
+
+yamanaka_gtf_edited <- yamanaka_gtf
+yamanaka_gtf_edited$type <- recode(
+  yamanaka_gtf_edited$type,
+  CDS = "cds",
+  five_prime_utr = "utr",
+  three_prime_utr = "utr"
+)
+yamanaka_gtf_edited <- yamanaka_gtf_edited[yamanaka_gtf_edited$type %in% c("cds", "utr", "gap")]
+```
+
+
+```{r}
+yamanaka_regions <- reduce(
+  split(yamanaka_gtf, yamanaka_gtf$gene_name)
+)
+
+yamanaka_bam_tracks <- bind_rows(
+  map(
+    yamanaka_regions,
+    \(x)   LoadTrackFile(
+      sendai_plot_data$bam_path,
+      region = paste0(seqnames(x), ":", start(x), "-", end(x)),
+      format = "bam",
+      meta.info = sendai_bam_meta,
+      norm.method = "None",
+      extend = 1000,
+      bin.size = 50,
+      # bc.extra.para = "--effectiveGenomeSize 2913022398"
+    )
+  ),
+  .id = "gene_name"
+) %>%
+  as_tibble() %>%
+  left_join(
+    sendai_plot_data %>%
+      select(where(negate(is.list))),
+    by = c("sample_accession")
+  ) %>%
+  mutate(
+    score_raw = score,
+    score = score * 1e6 / n_mapped
+  )
+
+yamanaka_plots <- imap(
+  yamanaka_regions,
+  \(region, gene_name) {
+    region_str <- paste0(seqnames(region), ":", start(region), "-", end(region))
+    gene_plot <- ggplot() +
+      geom_alignment(
+        yamanaka_gtf_edited[yamanaka_gtf_edited$gene_name == gene_name] %>%
+          split(.$gene_name),
+        # aes(
+        #   y = ypos
+        # ),
+        # range.geom = "arrow",
+        cds.rect.h = 0.05
+      )
+
+    coverage_plot <- ggplot(
+      yamanaka_bam_tracks %>%
+        filter(.data$gene_name == .env$gene_name) %>%
+        pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos") %>%
+        group_by(treatment) %>%
+        mutate(
+          rep = factor(
+            sample_accession, labels = c("1", " 2")
+          )
+        ) %>%
+        ungroup(),
+      aes(
+        x = pos,
+        y = score,
+        color = rep,
+        fill = rep,
+        group = sample_accession
+      )
+    ) +
+      # geom_line() +
+      geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.5) +
+      facet_wrap(~treatment, ncol = 1) +
+      guides(
+        # color = "none",
+        # fill = "none"
+      ) +
+      # geom_gene(gene_granges) +
+      scale_y_log10(
+        labels = scales::label_log()
+      ) +
+      labs(
+        y = "CPM", color = "Replicate", fill = "Replicate",
+        title = gene_name
+      ) +
+      theme(
+        panel.grid.minor.y = element_blank(),
+        legend.position = "top"
+      )
+
+    combined <- tracks(
+      coverage_plot, gene_plot,
+      heights = c(1, 0.15)
+    )
+
+    xlim(combined) <- c(start(region), end(region))
+    # browser()
+    combined
+  }
+)
+
+iwalk(
+  yamanaka_plots,
+  \(plot, gene_name) {
+    withr::with_cairo_pdf(
+      paste0("plots/yamanaka_", gene_name, "_coverage_tracks.pdf"),
+      width = 4, height = 4,
+      {
+        print(plot)
+      }
+    )
+  }
+)
+
+withr::with_pdf(
+  "test.pdf",
+  yamanaka_plots_combined <- gridExtra::grid.arrange(
+    grobs = map(yamanaka_plots, \(x) as(x, "grob")),
+    nrow = 1
+  )
+)
+
+withr::with_cairo_pdf(
+  "plots/yamanaka_coverage_tracks.pdf",
+  grid::grid.draw(yamanaka_plots_combined),
+  width = 14, height = 6
+)
+
+```
