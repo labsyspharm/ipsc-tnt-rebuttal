@@ -48,7 +48,7 @@ ensembl_gtf <- rtracklayer::readGFF(
   as_tibble()
 
 ensembl_gtf %>%
-  filter(type == "gene") %>%
+  filter(type == "gene", gene_biotype == "protein_coding") %>%
   drop_na(gene_name, gene_id) %>%
   distinct() %>%
   group_by(gene_name) %>%
@@ -74,10 +74,23 @@ salmon_quant <- tximport(
   ignoreTxVersion = TRUE
 )
 
-qsave(
-  salmon_quant,
-  here("quants", "salmon_quant_raw.qs")
-)
+
+```
+
+Some old Salmon runs no longer on the cluster, have to merge with what was
+already on synapse
+
+```{r}
+salmon_quant_old <- syn("syn53088996") %>%
+  qread()
+
+setdiff(colnames(salmon_quant$abundance), colnames(salmon_quant_old$abundance))
+setdiff(colnames(salmon_quant_old$abundance), colnames(salmon_quant$abundance))
+```
+
+Actually, nevermind, they're all still there. Don't have to merge.
+
+```{r}
 
 salmon_tpm <- salmon_quant[c("abundance", "counts")] %>%
   imap(
