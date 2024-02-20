@@ -261,6 +261,7 @@ sample_meta_edited <- sample_meta %>%
       treatment == "Naïve" ~ "t2iLGoY",
       cell_type == "primed hESC" ~ "Primed",
       cell_type == "naive hESC" ~ "Naïve",
+      source_name == "5iLAF SSEA4- subpopulation UCLA1 hESCs" ~ "Control ESC",
       TRUE ~ treatment
     )
   )
@@ -359,7 +360,75 @@ plot_data <- plot_samples %>%
 
 baseline_data <- plot_data %>%
   filter(
-    study_name == "Ji CSC 2016"
+    source_name == "5iLAF SSEA4- subpopulation UCLA1 hESCs"
+  ) %>%
+  group_by(gene_name, study_name) %>%
+  summarize(
+    ratio = 10^(sum(log10(ratio)) / n()),
+    .groups = "drop"
+  )
+
+RATIO_ADDED <- min(na.omit(plot_data$ratio)) / 2
+
+breaks <- 10^(-10:10)
+minor_breaks <- sort(unique(c(rep(1:9, 11)*(10^rep(0:10, each=9)), (10^rep(-10:0, each=9)) / rep(1:9, 11))))
+
+LOW_COUNT_THRESHOLD <- 30
+
+p <- plot_data %>%
+  mutate(
+    ratio = if_else(!is.finite(ratio), RATIO_ADDED, ratio),
+    counts_low = count_total < LOW_COUNT_THRESHOLD,
+    count_total_bin = cut(count_total, breaks = c(-Inf, 50, Inf), labels = paste0(c("<", "≥"), LOW_COUNT_THRESHOLD), ordered_result = TRUE)
+  ) %>%
+  ggplot(
+    aes(x = sample_group, y = ratio, shape = study_name, color = study_name)
+  ) +
+  geom_hline(yintercept = RATIO_ADDED, linetype = "dashed") +
+  geom_hline(
+    aes(yintercept = ratio, color = study_name),
+    data = baseline_data
+  ) +
+  geom_quasirandom(
+    aes(alpha = count_total_bin)
+  ) +
+  scale_shape_manual(
+    values = c(
+      "Buckberry Nature 2023" = 16,
+      "Ji CSC 2016" = 17,
+      "Liu Nat Met 2017" = 3,
+      "Pastor CSC 2016" = 23
+    )
+  ) +
+  scale_alpha_manual(values = set_names(c(0.5, 1), paste0(c("<", "≥"), LOW_COUNT_THRESHOLD))) +
+  paletteer::scale_color_paletteer_d("tidyquant::tq_light") +
+  scale_y_log10(breaks = c(0.1, 1, 10, 100, 1000), minor_breaks = NULL) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = rel(.8)),
+    legend.key.size = unit(10, "pt"),
+    legend.text = element_text(size = unit(10, "pt")),
+    legend.title = element_text(size = rel(.8))
+    # legend.position = "top",
+    # legend.direction = "vertical",
+    # legend.box = "horizontal"
+  ) +
+  facet_wrap(~gene_name) +
+  labs(
+    y = "CDS / UTR Ratio", x = NULL, shape = "Source", color = "Source", alpha = "Total count"
+  )
+
+ggsave(
+  here("plots", "yamanaka_ratios_select_samples_log_star_rpk.pdf"),
+  p, width = 7.5, height = 3,
+  dev = Cairo::CairoPDF
+)
+
+
+baseline_data <- plot_data %>%
+  filter(
+    treatment == "Control ESC",
+    study_name == "Buckberry Nature 2023"
   ) %>%
   group_by(gene_name, study_name) %>%
   summarize(
@@ -373,9 +442,11 @@ breaks <- 10^(-10:10)
 minor_breaks <- sort(unique(c(rep(1:9, 11)*(10^rep(0:10, each=9)), (10^rep(-10:0, each=9)) / rep(1:9, 11))))
 
 p <- plot_data %>%
+  filter(study_name != "Pastor CSC 2016") %>%
   mutate(
     ratio = if_else(!is.finite(ratio), RATIO_ADDED, ratio),
-    counts_low = count_total < 30
+    counts_low = count_total < 50,
+    count_total_bin = cut(count_total, breaks = c(-Inf, 50, Inf), ordered_result = TRUE)
   ) %>%
   ggplot(
     aes(x = sample_group, y = ratio, shape = study_name, color = study_name)
@@ -386,18 +457,33 @@ p <- plot_data %>%
     data = baseline_data
   ) +
   geom_quasirandom(
-    aes(alpha = counts_low)
+    aes(alpha = count_total_bin)
   ) +
-  scale_alpha_manual(values = c(`TRUE` = 0.3, `FALSE` = 0.9), guide = "none") +
+  scale_shape_manual(
+    values = c(
+      "Buckberry Nature 2023" = 16,
+      "Ji CSC 2016" = 17,
+      "Liu Nat Met 2017" = 3
+      # "Pastor CSC 2016" = 23
+    )
+  ) +
+  scale_alpha_manual(values = c("<50" = 0.3, "≥50" = 0.9)) +
   scale_y_log10(breaks = c(0.1, 1, 10, 100, 1000), minor_breaks = NULL) +
-  theme_linedraw() +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = rel(.8)),
+    legend.key.size = unit(8, "pt"),
+    legend.text = element_text(size = unit(8, "pt")),
+    legend.title = element_text(size = rel(.8)),
+  ) +
   facet_wrap(~gene_name) +
   labs(
-    y = "CDS / UTR Ratio", x = NULL, shape = "Source", color = "Source"
+    y = "CDS / UTR Ratio", x = NULL, shape = "Source", color = "Source", alpha = "Total count"
   )
 
+
 ggsave(
-  here("plots", "yamanaka_ratios_select_samples_log_star_rpk.pdf"),
+  here("plots", "yamanaka_ratios_select_samples_log_star_rpk_no_pastor.pdf"),
   p, width = 8.5, height = 4
 )
 
