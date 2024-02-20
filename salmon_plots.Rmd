@@ -433,6 +433,7 @@ ggsave(
   width = 8.5, height = 3
 )
 
+Y_ZERO_POS <- 0.005
 
 p <- time_course_data %>%
   mutate(
@@ -445,7 +446,7 @@ p <- time_course_data %>%
       .sep = "\n"
     ),
     is_zero = tpm == 0,
-    tpm = tpm + 0.005
+    tpm = tpm + Y_ZERO_POS
   ) %>%
   # filter(transcript_id == "Sendai_N_gene") %>%
   ggplot(
@@ -473,7 +474,7 @@ p <- time_course_data %>%
       show.legend = FALSE
     ) +
     geom_hline(
-      yintercept = 0.005,
+      yintercept = Y_ZERO_POS,
       color = "black",
       linetype = "dashed",
       alpha = 0.5
@@ -481,7 +482,16 @@ p <- time_course_data %>%
     scale_fill_brewer(palette = "Pastel2") +
     geom_quasirandom(
       aes(shape = study_name, group = medium),
-      dodge.width = .5
+      dodge.width = 0.5,
+      # varwidth = TRUE
+    ) +
+    scale_shape_manual(
+      values = c(
+        "Buckberry Nature 2023" = 16,
+        "Liu Nature 2020" = 17,
+        "Liu Nat Met 2017" = 3,
+        "Pastor CSC 2016" = 23
+      )
     ) +
     geom_text(
       aes(
@@ -506,28 +516,13 @@ p <- time_course_data %>%
       ),
       data = line_set_data %>%
         mutate(
-          tpm = tpm + 0.005
+          tpm = tpm + Y_ZERO_POS
         ),
       inherit.aes = FALSE,
       # color = "black",
       alpha = 0.8
     ) +
-    # geom_segment(
-    #   aes(
-    #     x = stage(time_point_plot, after_stat = x - .1),
-    #     xend = stage(time_point_plot, after_stat = x + .1),
-    #     y = tpm, yend = tpm,
-    #     color = medium
-    #   ),
-    #   data = line_set_data %>%
-    #     filter(!(time_point_plot == "D7" & !is.na(medium))) %>%
-    #     mutate(
-    #       tpm = tpm + 0.005
-    #     ),
-    #   inherit.aes = FALSE,
-    #   # color = "black",
-    #   alpha = 0.8
-    # ) +
+
     scale_color_hue(
       breaks = na.omit(unique(time_course_data$medium)),
       na.value = "black"
@@ -535,16 +530,19 @@ p <- time_course_data %>%
     theme_minimal() +
     scale_y_log10(
       labels = scales::trans_format("log10", scales::label_math(10^.x)),
-      expand = expansion(mult = c(0, 0.15))
+      expand = expansion(mult = c(0.05, 0.15))
     ) +
-    theme(plot.background = element_rect(fill = "white", color = NA)) +
+    theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      axis.text.x = element_text(size = rel(.8))
+    ) +
     coord_cartesian(clip = "off") +
     labs(y = "Average TPM Sendai genes", x = NULL, shape = "Source", color = "Medium")
 
 ggsave(
   here("plots", "sendai_time_course_log.pdf"),
   p,
-  width = 8.5, height = 3
+  width = 7, height = 3
 )
 
 

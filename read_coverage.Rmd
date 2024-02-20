@@ -43,8 +43,9 @@ ensembl_gtf <- rtracklayer::import(
 ```{r}
 samples_sendai <- sample_meta %>%
   filter(
-    study_name == "Buckberry Nature 2023",
-    treatment %in% c("NtP", "Naïve", "Primed", "Control ESC")
+    (study_name == "Buckberry Nature 2023" &
+      treatment %in% c("NtP", "Naïve", "Primed", "Control ESC", "TNT")) |
+      source_name == "5iLAF SSEA4- subpopulation UCLA1 hESCs"
   )
 
 ```
@@ -54,6 +55,8 @@ sendai_region <- "pSeV-idSOX2-Pmut:1150-19976"
 
 sendai_plot_data <- samples_sendai %>%
   mutate(
+    # Label Pastor samples correctly
+    treatment = replace_na(treatment, "Control ESC"),
     bam_name = paste0(sample_accession, "_Aligned.out_sorted"),
     bam_path = file.path("star", paste0(bam_name, ".bam")),
     bam_obj = map(
@@ -141,13 +144,25 @@ sendai_gene_plot <- ggplot() +
 
 sendai_bam_coverage_long <- sendai_bam_tracks %>%
   pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos") %>%
-  group_by(treatment) %>%
   mutate(
-    rep = factor(
-      sample_accession, labels = c("1", " 2")
+    treatment_grouped = case_when(
+      treatment == "Control ESC" ~ paste("Control ESC", study_name),
+      TRUE ~ treatment
     )
   ) %>%
+  group_by(treatment_grouped) %>%
+  mutate(
+    rep = factor(
+      sample_accession, labels = seq_len(as.character(length(unique(cur_data()$sample_accession))))
+    )
+  ) %>%
+  # Only keep two replicates
+  filter(
+    rep %in% c("1", "2")
+  ) %>%
   ungroup()
+
+X_SCALE <- c(1050, 16400)
 
 sendai_coverage_plot <- ggplot(
   sendai_bam_coverage_long %>%
@@ -166,12 +181,13 @@ sendai_coverage_plot <- ggplot(
   # geom_step(alpha = 0.6) +
   # geom_line(aes(y = score), alpha = 0.5) +
   geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.6, outline.type = "upper", color = NA) +
-  ggh4x::facet_wrap2(~treatment, ncol = 1, strip.position = "right", axes = "all", remove_labels = "x") +
+  ggh4x::facet_wrap2(~treatment_grouped, ncol = 1, strip.position = "right", axes = "all", remove_labels = "x") +
   geom_text(
-    aes(x = -Inf, y = Inf, label = treatment),
-    data = distinct(sendai_bam_coverage_long, treatment),
+    aes(x = X_SCALE[1] + 500, y = 1e2, label = treatment_grouped),
+    data = distinct(sendai_bam_coverage_long, treatment_grouped),
     inherit.aes = FALSE,
-    hjust = -.1, vjust = 1
+    hjust = 0, vjust = 1,
+    size = 3
   ) +
   guides(
     # color = "none",
@@ -194,8 +210,9 @@ sendai_coverage_plot <- ggplot(
   theme(
     strip.background = element_blank(),
     strip.text = element_blank(),
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.major.y = element_blank(),
+    axis.text.y = element_text(size = rel(0.8)),
     # axis.line.x = element_line(size = 1),
     legend.position = "top"
   )
@@ -206,8 +223,38 @@ ggplot2::ggsave(
   width = 5, height = 4
 )
 
+sendai_combined <- patchwork::wrap_plots(
+  sendai_coverage_plot +
+    coord_cartesian(xlim = X_SCALE, expand = FALSE) +
+    theme(
+      # axis.text.x = element_blank(),
+      axis.title.x = element_blank(),
+      legend.key.size = unit(8, "pt"),
+      legend.title = element_text(size = unit(8, "pt")),
+      legend.text = element_text(size = rel(0.8)),
+      legend.margin = margin(0, 0, 0, 0)
+    ),
+  sendai_gene_plot +
+    coord_cartesian(clip = "off", xlim = X_SCALE, expand = FALSE) +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text.x = element_blank(),
+      axis.title.x = element_blank()
+    ),
+  heights = c(1, 0.15)
+)
+
+ggplot2::ggsave(
+  "plots/sendai_coverage_tracks1.pdf",
+  sendai_combined,
+  width = 4, height = 3.5
+)
+
 sendai_combined <- tracks(
-  sendai_coverage_plot, sendai_gene_plot,
+  sendai_coverage_plot,
+  sendai_gene_plot,
+  ncol = 1,
   heights = c(1, 0.15)
 )
 
@@ -256,7 +303,7 @@ yamanaka_bam_tracks <- bind_rows(
       meta.info = sendai_bam_meta,
       norm.method = "None",
       extend = 1000,
-      bin.size = 50,
+      bin.size = 100,
       # bc.extra.para = "--effectiveGenomeSize 2913022398"
     )
   ),
@@ -276,6 +323,7 @@ yamanaka_bam_tracks <- bind_rows(
 yamanaka_plots <- imap(
   yamanaka_regions,
   \(region, gene_name) {
+    # browser()
     region_str <- paste0(seqnames(region), ":", start(region), "-", end(region))
     gene_plot <- ggplot() +
       geom_alignment(
@@ -288,51 +336,111 @@ yamanaka_plots <- imap(
         cds.rect.h = 0.05
       )
 
-    coverage_plot <- ggplot(
-      yamanaka_bam_tracks %>%
-        filter(.data$gene_name == .env$gene_name) %>%
-        pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos") %>%
-        group_by(treatment) %>%
+    bam_coverage_long <- yamanaka_bam_tracks %>%
+      filter(
+        gene_name == gene_name
+      ) %>%
+      pivot_longer(c(start, end), names_to = "pos_type", values_to = "pos") %>%
+      mutate(
+        treatment_grouped = case_when(
+          treatment == "Control ESC" ~ paste("Control ESC", str_split_fixed(study_name, " ", 3)[, 1], "et al."),
+          TRUE ~ treatment
+        )
+      ) %>%
+      group_by(treatment_grouped) %>%
+      mutate(
+        rep = factor(
+          sample_accession, labels = seq_len(as.character(length(unique(cur_data()$sample_accession))))
+        )
+      ) %>%
+      # Only keep two replicates
+      filter(
+        rep %in% c("1", "2")
+      ) %>%
+      ungroup()
+
+    X_SCALE <- c(start(region), end(region))
+    X_LEN <- end(region) - start(region)
+    X_SCALE <- c(X_SCALE[1] - 0.05 * X_LEN, X_SCALE[2] + 0.05 * X_LEN)
+
+    yamanaka_coverage_plot <- ggplot(
+      bam_coverage_long %>%
         mutate(
-          rep = factor(
-            sample_accession, labels = c("1", " 2")
-          )
-        ) %>%
-        ungroup(),
+          score = pmax(score, 1e-8)
+        ),
       aes(
         x = pos,
         y = score,
-        color = rep,
         fill = rep,
         group = sample_accession
       )
     ) +
       # geom_line() +
-      geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.5) +
-      facet_wrap(~treatment, ncol = 1) +
+      # geom_ribbon(aes(ymax = score), ymin = -Inf, alpha = 0.5, line.width = NA, outline.type = "upper") +
+      # geom_step(alpha = 0.6) +
+      # geom_line(aes(y = score), alpha = 0.5) +
+      geom_ribbon(aes(x = pos, ymax = score), ymin = -Inf, alpha = 0.6, outline.type = "upper", color = NA) +
+      ggh4x::facet_wrap2(~treatment_grouped, ncol = 1, strip.position = "right", axes = "all", remove_labels = "x") +
+      geom_text(
+        aes(x = X_SCALE[1] + .02 * X_LEN, y = 1e2, label = treatment_grouped),
+        data = distinct(bam_coverage_long, treatment_grouped),
+        inherit.aes = FALSE,
+        hjust = 0, vjust = 1,
+        size = 3
+      ) +
       guides(
         # color = "none",
         # fill = "none"
       ) +
+      paletteer::scale_fill_paletteer_d("colorblindr::OkabeIto") +
       # geom_gene(gene_granges) +
       scale_y_log10(
-        labels = scales::label_log()
+        labels = scales::label_log(),
+        breaks = c(1e-3, 1e2),
+        limits = c(1e-3, 1e2),
+        expand = c(0, 0),
+        oob = scales::squish_infinite
       ) +
+      scale_x_continuous(
+        labels = scales::label_number(scale_cut = scales::cut_short_scale(), suffix = "b")
+      ) +
+      # scale_y_log10() +
       labs(
-        y = "CPM", color = "Replicate", fill = "Replicate",
-        title = gene_name
+        y = "CPM", color = "Replicate", fill = "Replicate"
       ) +
+      theme_classic() +
       theme(
+        strip.background = element_blank(),
+        strip.text = element_blank(),
         panel.grid.minor.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        axis.text.y = element_text(size = rel(0.8)),
+        # axis.line.x = element_line(size = 1),
         legend.position = "top"
       )
 
-    combined <- tracks(
-      coverage_plot, gene_plot,
-      heights = c(1, 0.15)
+    combined <- patchwork::wrap_plots(
+      yamanaka_coverage_plot +
+        coord_cartesian(xlim = X_SCALE, expand = FALSE) +
+        theme(
+          # axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          legend.key.size = unit(8, "pt"),
+          legend.title = element_text(size = unit(8, "pt")),
+          legend.text = element_text(size = rel(0.8)),
+          legend.margin = margin(0, 0, 0, 0)
+        ),
+      gene_plot +
+        coord_cartesian(clip = "off", xlim = X_SCALE, expand = FALSE) +
+        theme(
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank()
+        ),
+      heights = c(1, 0.06)
     )
 
-    xlim(combined) <- c(start(region), end(region))
     # browser()
     combined
   }
@@ -354,7 +462,27 @@ iwalk(
 withr::with_pdf(
   "test.pdf",
   yamanaka_plots_combined <- gridExtra::grid.arrange(
-    grobs = map(yamanaka_plots, \(x) as(x, "grob")),
+    grobs = map2(
+      yamanaka_plots,
+      seq_along(yamanaka_plots),
+      \(x, i) {
+        # browser()
+        x[[1]] <- x[[1]] +
+          # guides(
+          #   fill = if(i == 1) guide_legend() else "none"
+          # ) +
+          theme(
+            axis.title.y = if(i == 1) element_text() else element_blank(),
+            axis.text.y = if(i == 1) element_text() else element_blank()
+          )
+        x <- x & theme(
+          plot.margin = margin(0, 0, 8, 0),
+          axis.text.x = element_blank(),
+          axis.ticks.x = element_blank()
+        )
+        patchwork:::as_patch(x)
+      }
+    ),
     nrow = 1
   )
 )
@@ -362,7 +490,7 @@ withr::with_pdf(
 withr::with_cairo_pdf(
   "plots/yamanaka_coverage_tracks.pdf",
   grid::grid.draw(yamanaka_plots_combined),
-  width = 14, height = 6
+  width = 8, height = 3.5
 )
 
 ```
