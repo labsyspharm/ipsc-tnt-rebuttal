@@ -502,7 +502,7 @@ p <- time_course_data %>%
           stage = str_replace(stage, " ", "\n")
         ),
       y = STAGE_Y_POS,
-      size = 3,
+      size = 2.5,
       hjust = .5, vjust = 1,
       inherit.aes = FALSE
     ) +
@@ -536,7 +536,8 @@ p <- time_course_data %>%
       plot.background = element_rect(fill = "white", color = NA),
       axis.text.x = element_text(size = rel(.8)),
       legend.key.size = unit(8, "pt"),
-      legend.text = element_text(size = unit(8, "pt"))
+      legend.text = element_text(size = unit(8, "pt")),
+      legend.title = element_text(size = rel(.8))
     ) +
     coord_cartesian(clip = "off") +
     labs(y = "Average TPM Sendai genes", x = NULL, shape = "Source", color = "Medium")
@@ -544,7 +545,7 @@ p <- time_course_data %>%
 ggsave(
   here("plots", "sendai_time_course_log.pdf"),
   p,
-  width = 7, height = 3
+  width = 6, height = 3
 )
 
 
