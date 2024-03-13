@@ -31,16 +31,12 @@ file_no_ext=${file%.*}
 output_prefix="${OUTPUT_PATH}/${file_no_ext}"
 echo "$SLURM_JOB_ID" > "${output_prefix}.lock"
 sorted_bam_path="${output_prefix}_sorted.bam"
-if [ ! -f "$sorted_bam_path" ]; then
-  samtools sort -n -@ 8 -m 4G -o "$sorted_bam_path" "$i"
-fi
-if [ ! -f "${output_prefix}_1.fastq.gz" ]; then
-  samtools fastq -1 >(pigz -p 3 -c > "${output_prefix}_1.fastq.gz") \
-    -2 >(pigz -p 3 -c > "${output_prefix}_2.fastq.gz") \
-    -0 >(pigz -p 3 -c > "${output_prefix}_unpaired.fastq.gz") \
-    -@ 4 "$sorted_bam_path"
-  rm "$sorted_bam_path"
-fi
+samtools sort -n -@ 8 -m 4G -o "$sorted_bam_path" "$i"
+samtools fastq -1 >(pigz -p 3 -c > "${output_prefix}_1.fastq.gz") \
+  -2 >(pigz -p 3 -c > "${output_prefix}_2.fastq.gz") \
+  -0 >(pigz -p 3 -c > "${output_prefix}_unpaired.fastq.gz") \
+  -@ 4 "$sorted_bam_path"
+rm "$sorted_bam_path"
 rm "${output_prefix}.lock"
 echo "$SLURM_JOB_ID" > "${output_prefix}.done"
 done

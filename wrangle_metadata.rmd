@@ -298,21 +298,12 @@ biosample_meta_raw <- bind_rows(
 )
 ```
 
+SRR3106350 doesn't have original filename available.
 
+For Pastor CSC 2016 we only use RNA-seq samples, so warnings here are fine.
 
 ```{r}
 biosample_meta <- biosample_meta_raw %>%
-  rename(
-    treatment_original = treatment
-  ) %>%
-  left_join(
-    buckberry_manual_labels,
-    by = c("biosample")
-  ) %>%
-  mutate(
-    treatment = coalesce(treatment, treatment_original),
-    time_point = coalesce(time_point_manual, time_point)
-  ) %>%
   power_left_join(
     run_metadata_fastqdl %>%
       power_left_join(

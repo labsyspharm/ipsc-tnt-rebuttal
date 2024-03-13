@@ -12,7 +12,7 @@
 #  parallel sbatch star.sh /n/scratch3/users/c/ch305/indices/hg38_107/star trimmed/{} star_first/*SJ.out.tab
 
 # USAGE EXAMPLE
-# sbatch star.sh /n/scratch3/users/c/ch305/indices/hg38_107/star trimmed/SRR123 (tab)
+# sbatch star.sh /n/scratch3/users/c/ch305/indices/hg38_107/star trimmed/SRR123
 
 module load gcc/6.2.0 star/2.7.9a
 
@@ -29,8 +29,8 @@ do
 dir=${i%/*}
 file="${i##*/}"
 echo "$SLURM_JOB_ID" > "${OUTPUT_PATH}/${file}.lock"
-# --seqBias --gcBias --posBias --recoverOrphans --softclip -p 4 \
 if [ -f "${i}_2.fastq.gz" ]; then
+  # Paired-end
   STAR --runThreadN 8 \
     --genomeDir "$1" \
     --readFilesIn "${i}_1.fastq.gz" "${i}_2.fastq.gz" \
@@ -39,6 +39,7 @@ if [ -f "${i}_2.fastq.gz" ]; then
     --outFileNamePrefix "${OUTPUT_PATH}/${file}_" \
     --chimOutType WithinBAM
 else
+  # Single-end
   STAR --runThreadN 8 \
     --genomeDir "$1" \
     --readFilesIn "${i}_1.fastq.gz" \
