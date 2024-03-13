@@ -175,13 +175,11 @@ pwalk(
 ```
 
 
-Buckberry samples are most likely mislabeled in SRA. Based on their filenames
-we can try to reconstruct their actual identity.
+Buckberry samples are most likely mislabeled in SRA. Based on their original
+filenames on SRA we can reconstruct their actual identity.
 
-The `title` column is completely wrong. Discarding it. `source_name` and `treatment`
-are shifted.
+The `title` column seems completely wrong. Discarding it.
 
-The correct labels are manually curated from the file names.
 
 ```{r}
 buckberry_manual_labels <- tibble::tribble(
@@ -200,6 +198,9 @@ buckberry_manual_labels <- tibble::tribble(
   "SAMN16380656", "SAMN16380663", "P15"
 )
 ```
+
+Process metadata so that they more or less are consistent between studies.
+Still requires some manual curation.
 
 ```{r}
 read_biosample_xml <- function(file) {

@@ -1,0 +1,330 @@
+---
+title: "Plot Salmon quants"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(tidyverse)
+library(powerjoin)
+library(data.table)
+library(synExtra)
+library(ggbeeswarm)
+
+synapser::synLogin()
+
+syn <- synDownloader("~/data", .cache = TRUE)
+```
+
+```{r}
+inputs <- c(
+  sample_meta = "syn53061904",
+  salmon_quants = "syn53061910"
+)
+
+input_files <- map(
+  inputs, syn
+)
+
+```
+
+## Metadata
+
+```{r}
+sample_meta <- read_csv(input_files[["sample_meta"]])
+salmon_quants <- read_csv(input_files[["salmon_quants"]])
+```
+
+Select relevant samples and group them in treatment groups.
+
+```{r}
+sample_meta_edited <- sample_meta %>%
+  mutate(
+    treatment = if_else(
+      treatment == "Naïve",
+      "t2iLGoY",
+      treatment
+    )
+  )
+
+time_course_samples <- tribble(
+  ~treatment, ~time_point, ~time_point_plot, ~sample_group,
+  "Fibroblast", "P8", "D0", "Fibroblast",
+  "Fibroblast", "P20 + 3", "D0", "Fibroblast",
+  "Fibroblast", "D3", "D3", "Sendai Reprogramming",
+  "Fibroblast", "D7", "D7", "Sendai Reprogramming",
+) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("5iLAF", "NHSM", "t2iLGoY", "RSeT"),
+        tissue == "iPSCs" | is.na(tissue)
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = recode(time_point, P10 = "P10-12", P12 = "P10-12", P15 = "P15-21", P17 = "P15-21", P18 = "P15-21", P21 = "P15-21"),
+        sample_group = "Naïve"
+      )
+  ) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("Primed"),
+        tissue == "iPSCs" | is.na(tissue)
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = recode(time_point, P10 = "P10-12", P12 = "P10-12", P15 = "P15-21", P17 = "P15-21", P18 = "P15-21", P21 = "P15-21"),
+        sample_group = "Primed"
+      )
+  ) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("NtP")
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = "NtP",
+        sample_group = "NtP"
+      )
+  ) %>%
+  bind_rows(
+    sample_meta_edited %>%
+      filter(
+        treatment %in% c("Control ESC") |
+          (replace_na(tissue == "ESCs", FALSE) & treatment == "Primed") |
+          source_name == "5iLAF SSEA4- subpopulation UCLA1 hESCs"
+      ) %>%
+      distinct(time_point, treatment) %>%
+      mutate(
+        time_point_plot = "ESC",
+        sample_group = "ESC"
+      )
+  ) %>%
+  mutate(
+    across(
+      time_point_plot,
+      \(x) {
+        y <- tibble(time_point = x) %>%
+          extract(
+            time_point,
+            into = c("prefix", "number"),
+            regex = "^([A-Za-z]+)([0-9]+).*$",
+            remove = FALSE,
+            convert = TRUE
+          ) %>%
+          arrange(prefix == "P", number)
+        # browser()
+        ordered(
+          x,
+          y %>%
+            pull(time_point) %>%
+            c("NtP", "ESC") %>%
+            unique()
+        )
+      }
+    ),
+    medium = case_when(
+      treatment %in% c("5iLAF", "NHSM", "t2iLGoY", "RSeT") ~ treatment,
+      treatment %in% c("Primed", "NtP") & !sample_group == "ESC" ~ "Primed medium",
+      TRUE ~ NA_character_
+    ),
+    stage = case_when(
+      sample_group %in% c("Fibroblast") ~ "Fibroblast",
+      sample_group %in% c("Sendai Reprogramming") ~ "Sendai Reprogramming",
+      sample_group %in% c("Naïve", "Primed") ~ "Naïve/Primed",
+      sample_group %in% c("NtP") ~ "NtP",
+      sample_group %in% c("ESC") ~ "ESC",
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+Create shaded areas for each treatment group.
+
+```{r}
+stage_markers <- time_course_samples %>%
+  group_by(stage) %>%
+  summarize(
+    start = min(time_point_plot),
+    end = max(time_point_plot),
+    .groups = "drop"
+  )
+```
+
+Add average Sendai expression for each selected sample.
+
+```{r}
+time_course_data <- sample_meta_edited %>%
+  inner_join(
+    time_course_samples,
+    by = c("treatment", "time_point")
+  ) %>%
+  inner_join(
+    salmon_quants %>%
+      filter(
+        str_starts(transcript_id, fixed("Sendai")),
+        transcript_id != "Sendai_F_gene"
+      ) %>%
+      group_by(sample_accession) %>%
+      summarize(across(c(tpm, count), mean), .groups = "drop"),
+    by = "sample_accession"
+  )
+```
+
+Create lines connecting the averages for each treatment group.
+
+```{r}
+line_set_data <- tribble(
+  ~set, ~sample_group,
+  "Sendai Reprogramming", "Fibroblast",
+  "Sendai Reprogramming", "Sendai Reprogramming",
+  "Naïve", "Sendai Reprogramming",
+  "Naïve", "Naïve",
+  "Primed", "Sendai Reprogramming",
+  "Primed", "Primed",
+) %>%
+  inner_join(
+    time_course_data,
+    by = "sample_group",
+    relationship = "many-to-many"
+  ) %>%
+  group_by(set, sample_group, time_point_plot, medium) %>%
+  summarize(across(c(tpm, count), mean), .groups = "drop") %>%
+  bind_rows(
+    filter(., time_point_plot == "D7") %>%
+    select(-medium) %>%
+    crossing(
+      medium = c("5iLAF", "NHSM", "t2iLGoY", "RSeT", "Primed medium")
+    )
+  )
+```
+
+Create the plot. Add small value to zero TPMs to avoid log10(0) errors.
+Draw dotted line to indicate zero TPM.
+
+```{r}
+Y_ZERO_POS <- 0.005
+
+p <- time_course_data %>%
+  mutate(
+    hovertext = glue::glue(
+      "{study_name} {sample_accession}",
+      "Title: \"{title}\"",
+      "Source Name: \"{source_name}\"",
+      "File Name: \"{filename_prefix}\"",
+      "TPM: {signif(tpm, 3)} Count: {signif(count, 3)} (three significant figures)",
+      .sep = "\n"
+    ),
+    is_zero = tpm == 0,
+    tpm = tpm + Y_ZERO_POS
+  ) %>%
+  ggplot(
+    aes(
+      time_point_plot,
+      tpm,
+      color = medium,
+      text = hovertext
+    )
+  ) +
+    scale_x_discrete(
+      limits = levels(time_course_samples$time_point_plot),
+      labels = \(x) str_replace(x, "_", "")
+    ) +
+    geom_rect(
+      aes(
+        xmin = stage(start, after_stat = xmin - .5),
+        xmax = stage(end, after_stat = xmax + .5),
+        fill = stage
+      ),
+      data = stage_markers,
+      alpha = 0.3,
+      ymin = -Inf, ymax = Inf,
+      inherit.aes = FALSE,
+      show.legend = FALSE
+    ) +
+    geom_hline(
+      yintercept = Y_ZERO_POS,
+      color = "black",
+      linetype = "dashed",
+      alpha = 0.5
+    ) +
+    scale_fill_brewer(palette = "Pastel2") +
+    geom_quasirandom(
+      aes(shape = study_name, group = medium),
+      dodge.width = 0.5,
+      # varwidth = TRUE
+    ) +
+    scale_shape_manual(
+      values = c(
+        "Buckberry Nature 2023" = 16,
+        "Liu Nature 2020" = 17,
+        "Liu Nat Met 2017" = 3,
+        "Pastor CSC 2016" = 23
+      )
+    ) +
+    geom_text(
+      aes(
+        xmin = start, xmax = end, x = after_stat(.5 * (xmin + xmax)), label = stage
+      ),
+      data = stage_markers %>%
+        mutate(
+          stage = str_replace(stage, " ", "\n")
+        ),
+      y = Inf,
+      size = 2.5,
+      hjust = .5, vjust = 1,
+      inherit.aes = FALSE
+    ) +
+    geom_line(
+      aes(
+        x = time_point_plot,
+        y = tpm,
+        group = medium,
+        color = medium
+      ),
+      data = line_set_data %>%
+        mutate(
+          tpm = tpm + Y_ZERO_POS
+        ),
+      inherit.aes = FALSE,
+      alpha = 0.8
+    ) +
+    scale_color_hue(
+      breaks = na.omit(unique(time_course_data$medium)),
+      na.value = "black"
+    ) +
+    theme_minimal() +
+    scale_y_log10(
+      labels = scales::trans_format("log10", scales::label_math(10^.x)),
+      expand = expansion(mult = c(0.05, 0.15))
+    ) +
+    theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      axis.text.x = element_text(size = rel(.8)),
+      legend.key.size = unit(8, "pt"),
+      legend.text = element_text(size = unit(8, "pt")),
+      legend.title = element_text(size = rel(.8))
+    ) +
+    coord_cartesian(clip = "off") +
+    labs(y = "Average TPM Sendai genes", x = NULL, shape = "Source", color = "Medium")
+
+ggsave(
+  here("plots", "sendai_time_course_log.pdf"),
+  p,
+  width = 6, height = 3
+)
+
+
+plt <- plotly::ggplotly(p, tooltip = "text")
+rmarkdown::find_pandoc(dir = "/usr/local/bin")
+htmlwidgets::saveWidget(
+  plt,
+  here("plots", "sendai_time_course_log.html"),
+  selfcontained = TRUE
+)
+
+```
